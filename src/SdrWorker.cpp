@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cmath>
 #include <exception>
 #include <random>
@@ -21,6 +22,7 @@
 
 namespace {
 constexpr float kTwoPi = 6.28318530717958647692f;
+constexpr float kInt16FullScale = 32767.0f;
 
 std::vector<std::complex<float>> generateSimulatedIq(std::size_t sampleCount, double sampleRate, std::size_t frameIndex)
 {
@@ -43,6 +45,39 @@ std::vector<std::complex<float>> generateSimulatedIq(std::size_t sampleCount, do
     }
 
     return samples;
+}
+
+std::vector<std::complex<std::int16_t>> quantizeToSc16(const std::vector<std::complex<float>> &samples)
+{
+    std::vector<std::complex<std::int16_t>> quantized(samples.size());
+    for (std::size_t i = 0; i < samples.size(); ++i) {
+        const float iValue = std::clamp(samples[i].real(), -1.0f, 1.0f);
+        const float qValue = std::clamp(samples[i].imag(), -1.0f, 1.0f);
+        quantized[i] = std::complex<std::int16_t>(
+            static_cast<std::int16_t>(std::lround(iValue * kInt16FullScale)),
+            static_cast<std::int16_t>(std::lround(qValue * kInt16FullScale)));
+    }
+    return quantized;
+}
+
+QVector<float> processWithIqFftw(IqFftwProcessor &processor,
+    const std::int16_t *iqInterleaved,
+    std::size_t iqValueCount,
+    std::size_t fftSize)
+{
+    std::vector<double> spectrumDbfs(fftSize);
+    const int result =
+        iq_fftw_processor_process_i16(&processor, iqInterleaved, iqValueCount, spectrumDbfs.data());
+    if (result != IQ_FFTW_OK) {
+        return {};
+    }
+
+    QVector<float> spectrum;
+    spectrum.reserve(static_cast<qsizetype>(fftSize));
+    for (double value : spectrumDbfs) {
+        spectrum.append(static_cast<float>(value));
+    }
+    return spectrum;
 }
 }
 
@@ -92,17 +127,32 @@ void SdrWorker::run()
 
 
         if (m_settings.inputSource == InputSource::Simulator) {
-            emit statusChanged("Streaming (simulator)");
+            const QString processorName = m_settings.processorMode == ProcessorMode::FloatFft
+                ? "FftProcessor"
+                : "IqFftwProcessor";
+            emit statusChanged("Streaming (simulator, " + processorName + ")");
 
             std::size_t frameIndex = 0;
             while (!m_stopRequested) {
                 const std::vector<std::complex<float>> samples =
                     generateSimulatedIq(samplesPerBuffer, m_settings.sampleRate, frameIndex++);
 
-                std::copy_n(samples.begin(), fftSize, fftInput.begin());
-                const std::vector<float> spectrum = processor.process(fftInput);
-                if (!spectrum.empty()) {
-                    emit spectrumReady(QVector<float>(spectrum.begin(), spectrum.end()));
+                if (m_settings.processorMode == ProcessorMode::FloatFft) {
+                    std::copy_n(samples.begin(), fftSize, fftInput.begin());
+                    const std::vector<float> spectrum = processor.process(fftInput);
+                    if (!spectrum.empty()) {
+                        emit spectrumReady(QVector<float>(spectrum.begin(), spectrum.end()));
+                    }
+                } else {
+                    const std::vector<std::complex<std::int16_t>> quantized = quantizeToSc16(samples);
+                    const QVector<float> spectrum = processWithIqFftw(
+                        iqProcessor,
+                        reinterpret_cast<const std::int16_t *>(quantized.data()),
+                        quantized.size() * 2U,
+                        fftSize);
+                    if (!spectrum.isEmpty()) {
+                        emit spectrumReady(spectrum);
+                    }
                 }
 
                 const auto frameTime = std::chrono::duration<double>(static_cast<double>(fftSize) / m_settings.sampleRate);
@@ -127,25 +177,30 @@ void SdrWorker::run()
         usrp->set_rx_bandwidth(m_settings.sampleRate);
         usrp->set_rx_antenna(m_settings.antenna.toStdString());
 
-        uhd::stream_args_t streamArgs("fc32", "sc16");
+        const bool useIqFftw = m_settings.processorMode == ProcessorMode::Int16Fftw;
+        uhd::stream_args_t streamArgs(useIqFftw ? "sc16" : "fc32", "sc16");
         auto rxStreamer = usrp->get_rx_stream(streamArgs);
 
-        std::vector<std::complex<float>> recvBuffer(samplesPerBuffer);
+        std::vector<std::complex<float>> recvBufferFloat;
+        std::vector<std::complex<std::int16_t>> recvBufferInt16;
+        if (useIqFftw) {
+            recvBufferInt16.resize(samplesPerBuffer);
+        } else {
+            recvBufferFloat.resize(samplesPerBuffer);
+        }
         uhd::rx_metadata_t metadata;
 
         uhd::stream_cmd_t streamCmd(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
         streamCmd.stream_now = true;
         rxStreamer->issue_stream_cmd(streamCmd);
 
-        emit statusChanged("Streaming (USRP)");
+        emit statusChanged(useIqFftw ? "Streaming (USRP, IqFftwProcessor)"
+                                     : "Streaming (USRP, FftProcessor)");
 
         while (!m_stopRequested) {
-            const std::size_t received = rxStreamer->recv(
-                recvBuffer.data(),
-                recvBuffer.size(),
-                metadata,
-                0.25,
-                false);
+            const std::size_t received = useIqFftw
+                ? rxStreamer->recv(recvBufferInt16.data(), recvBufferInt16.size(), metadata, 0.25, false)
+                : rxStreamer->recv(recvBufferFloat.data(), recvBufferFloat.size(), metadata, 0.25, false);
 
             if (metadata.error_code == uhd::rx_metadata_t::ERROR_CODE_TIMEOUT) {
                 continue;
@@ -159,13 +214,25 @@ void SdrWorker::run()
                 continue;
             }
 
-            std::copy_n(recvBuffer.begin(), fftSize, fftInput.begin());
-            const std::vector<float> spectrum = processor.process(fftInput);
-            if (spectrum.empty()) {
-                continue;
-            }
+            if (useIqFftw) {
+                const QVector<float> spectrum = processWithIqFftw(
+                    iqProcessor,
+                    reinterpret_cast<const std::int16_t *>(recvBufferInt16.data()),
+                    received * 2U,
+                    fftSize);
+                if (spectrum.isEmpty()) {
+                    continue;
+                }
+                emit spectrumReady(spectrum);
+            } else {
+                std::copy_n(recvBufferFloat.begin(), fftSize, fftInput.begin());
+                const std::vector<float> spectrum = processor.process(fftInput);
+                if (spectrum.empty()) {
+                    continue;
+                }
 
-            emit spectrumReady(QVector<float>(spectrum.begin(), spectrum.end()));
+                emit spectrumReady(QVector<float>(spectrum.begin(), spectrum.end()));
+            }
         }
 
         uhd::stream_cmd_t stopCmd(uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS);

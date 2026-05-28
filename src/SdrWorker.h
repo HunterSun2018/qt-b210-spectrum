@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <complex>
 #include <memory>
 #include <vector>
@@ -19,8 +20,14 @@ public:
         Simulator
     };
 
+    enum class ProcessorMode {
+        FloatFft,
+        Int16Fftw
+    };
+
     struct Settings {
         InputSource inputSource = InputSource::Usrp;
+        ProcessorMode processorMode = ProcessorMode::FloatFft;
         QString deviceArgs;
         double sampleRate = 1.0e6;
         double centerFreq = 103.9e6;

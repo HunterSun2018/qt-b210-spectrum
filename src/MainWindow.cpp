@@ -46,6 +46,9 @@ void MainWindow::startStreaming()
     settings.inputSource = m_sourceCombo->currentData().toInt() == 0
         ? SdrWorker::InputSource::Usrp
         : SdrWorker::InputSource::Simulator;
+    settings.processorMode = m_processorCombo->currentData().toInt() == 0
+        ? SdrWorker::ProcessorMode::FloatFft
+        : SdrWorker::ProcessorMode::Int16Fftw;
     settings.deviceArgs = m_deviceEdit->text();
     settings.sampleRate = m_rateSpin->value();
     settings.centerFreq = m_freqSpin->value();
@@ -106,6 +109,10 @@ void MainWindow::buildUi()
     m_sourceCombo->addItem("USRP B210", 0);
     m_sourceCombo->addItem("Simulator", 1);
 
+    m_processorCombo = new QComboBox(controlBox);
+    m_processorCombo->addItem("FftProcessor", 0);
+    m_processorCombo->addItem("IqFftwProcessor", 1);
+
     m_deviceEdit = new QLineEdit(controlBox);
     m_deviceEdit->setPlaceholderText("type=b200 or leave empty for auto-discovery");
 
@@ -143,19 +150,21 @@ void MainWindow::buildUi()
 
     controlLayout->addWidget(new QLabel("Source", controlBox), 0, 0);
     controlLayout->addWidget(m_sourceCombo, 0, 1);
-    controlLayout->addWidget(new QLabel("Device Args", controlBox), 0, 2);
-    controlLayout->addWidget(m_deviceEdit, 0, 3);
-    controlLayout->addWidget(new QLabel("Sample Rate", controlBox), 1, 0);
-    controlLayout->addWidget(m_rateSpin, 1, 1);
-    controlLayout->addWidget(new QLabel("Center Freq", controlBox), 1, 2);
-    controlLayout->addWidget(m_freqSpin, 1, 3);
-    controlLayout->addWidget(new QLabel("Gain", controlBox), 2, 0);
-    controlLayout->addWidget(m_gainSpin, 2, 1);
-    controlLayout->addWidget(new QLabel("FFT Size", controlBox), 2, 2);
-    controlLayout->addWidget(m_fftSpin, 2, 3);
-    controlLayout->addWidget(m_statusLabel, 3, 0, 1, 2);
-    controlLayout->addWidget(m_startButton, 3, 2);
-    controlLayout->addWidget(m_stopButton, 3, 3);
+    controlLayout->addWidget(new QLabel("Processor", controlBox), 0, 2);
+    controlLayout->addWidget(m_processorCombo, 0, 3);
+    controlLayout->addWidget(new QLabel("Device Args", controlBox), 1, 0);
+    controlLayout->addWidget(m_deviceEdit, 1, 1, 1, 3);
+    controlLayout->addWidget(new QLabel("Sample Rate", controlBox), 2, 0);
+    controlLayout->addWidget(m_rateSpin, 2, 1);
+    controlLayout->addWidget(new QLabel("Center Freq", controlBox), 2, 2);
+    controlLayout->addWidget(m_freqSpin, 2, 3);
+    controlLayout->addWidget(new QLabel("Gain", controlBox), 3, 0);
+    controlLayout->addWidget(m_gainSpin, 3, 1);
+    controlLayout->addWidget(new QLabel("FFT Size", controlBox), 3, 2);
+    controlLayout->addWidget(m_fftSpin, 3, 3);
+    controlLayout->addWidget(m_statusLabel, 4, 0, 1, 2);
+    controlLayout->addWidget(m_startButton, 4, 2);
+    controlLayout->addWidget(m_stopButton, 4, 3);
 
     m_spectrumWidget = new SpectrumWidget(central);
     m_waterfallWidget = new WaterfallWidget(central);

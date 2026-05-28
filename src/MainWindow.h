@@ -34,6 +34,7 @@ private:
     void buildUi();
 
     QComboBox *m_sourceCombo = nullptr;
+    QComboBox *m_processorCombo = nullptr;
     QLineEdit *m_deviceEdit = nullptr;
     QDoubleSpinBox *m_rateSpin = nullptr;
     QDoubleSpinBox *m_freqSpin = nullptr;
