@@ -45,18 +45,23 @@ void WaterfallWidget::paintEvent(QPaintEvent *event)
 {
     Q_UNUSED(event);
 
-    QPainter painter(this);
-    painter.fillRect(rect(), QColor(6, 8, 14));
-
-    if (m_image.isNull()) {
-        painter.setPen(QColor(150, 160, 180));
-        painter.drawText(rect(), Qt::AlignCenter, "Waiting for spectrum...");
+    const QRect drawRect = rect().adjusted(70, 0, -18, 0);
+    if (drawRect.width() <= 0 || drawRect.height() <= 0) {
         return;
     }
 
-    painter.drawImage(rect(), m_image);
+    QPainter painter(this);
+    painter.fillRect(drawRect, QColor(6, 8, 14));
+
+    if (m_image.isNull()) {
+        painter.setPen(QColor(150, 160, 180));
+        painter.drawText(drawRect, Qt::AlignCenter, "Waiting for spectrum...");
+        return;
+    }
+
+    painter.drawImage(drawRect, m_image);
     painter.setPen(QColor(220, 230, 245));
-    painter.drawText(rect().adjusted(8, 8, -8, -8), Qt::AlignTop | Qt::AlignLeft, "Waterfall");
+    painter.drawText(drawRect.adjusted(8, 8, -8, -8), Qt::AlignTop | Qt::AlignLeft, "Waterfall");
 }
 
 void WaterfallWidget::resizeEvent(QResizeEvent *event)

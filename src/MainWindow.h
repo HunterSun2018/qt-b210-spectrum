@@ -35,10 +35,12 @@ private:
 
     QComboBox *m_sourceCombo = nullptr;
     QComboBox *m_processorCombo = nullptr;
+    QComboBox *m_demodCombo = nullptr;
     QLineEdit *m_deviceEdit = nullptr;
     QDoubleSpinBox *m_rateSpin = nullptr;
     QDoubleSpinBox *m_freqSpin = nullptr;
     QDoubleSpinBox *m_gainSpin = nullptr;
+    QDoubleSpinBox *m_squelchSpin = nullptr;
     QSpinBox *m_fftSpin = nullptr;
     QPushButton *m_startButton = nullptr;
     QPushButton *m_stopButton = nullptr;

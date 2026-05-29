@@ -49,10 +49,12 @@ void MainWindow::startStreaming()
     settings.processorMode = m_processorCombo->currentData().toInt() == 0
         ? SdrWorker::ProcessorMode::FloatFft
         : SdrWorker::ProcessorMode::Int16Fftw;
+    settings.demodMode = static_cast<SdrWorker::DemodMode>(m_demodCombo->currentData().toInt());
     settings.deviceArgs = m_deviceEdit->text();
     settings.sampleRate = m_rateSpin->value();
     settings.centerFreq = m_freqSpin->value();
     settings.gain = m_gainSpin->value();
+    settings.squelchDb = m_squelchSpin->value();
     settings.fftSize = static_cast<std::size_t>(m_fftSpin->value());
 
     m_startButton->setEnabled(false);
@@ -113,6 +115,11 @@ void MainWindow::buildUi()
     m_processorCombo->addItem("FftProcessor", 0);
     m_processorCombo->addItem("IqFftwProcessor", 1);
 
+    m_demodCombo = new QComboBox(controlBox);
+    m_demodCombo->addItem("Off", static_cast<int>(SdrWorker::DemodMode::None));
+    m_demodCombo->addItem("FM", static_cast<int>(SdrWorker::DemodMode::FM));
+    m_demodCombo->addItem("AM", static_cast<int>(SdrWorker::DemodMode::AM));
+
     m_deviceEdit = new QLineEdit(controlBox);
     m_deviceEdit->setPlaceholderText("type=b200 or leave empty for auto-discovery");
 
@@ -137,6 +144,13 @@ void MainWindow::buildUi()
     m_gainSpin->setValue(40.0);
     m_gainSpin->setSuffix(" dB");
 
+    m_squelchSpin = new QDoubleSpinBox(controlBox);
+    m_squelchSpin->setRange(-120.0, 0.0);
+    m_squelchSpin->setDecimals(1);
+    m_squelchSpin->setSingleStep(1.0);
+    m_squelchSpin->setValue(-55.0);
+    m_squelchSpin->setSuffix(" dBFS");
+
     m_fftSpin = new QSpinBox(controlBox);
     m_fftSpin->setRange(256, 16384);
     m_fftSpin->setSingleStep(256);
@@ -152,19 +166,23 @@ void MainWindow::buildUi()
     controlLayout->addWidget(m_sourceCombo, 0, 1);
     controlLayout->addWidget(new QLabel("Processor", controlBox), 0, 2);
     controlLayout->addWidget(m_processorCombo, 0, 3);
-    controlLayout->addWidget(new QLabel("Device Args", controlBox), 1, 0);
-    controlLayout->addWidget(m_deviceEdit, 1, 1, 1, 3);
+    controlLayout->addWidget(new QLabel("Demod", controlBox), 1, 0);
+    controlLayout->addWidget(m_demodCombo, 1, 1);
+    controlLayout->addWidget(new QLabel("Device Args", controlBox), 1, 2);
+    controlLayout->addWidget(m_deviceEdit, 1, 3);
     controlLayout->addWidget(new QLabel("Sample Rate", controlBox), 2, 0);
     controlLayout->addWidget(m_rateSpin, 2, 1);
     controlLayout->addWidget(new QLabel("Center Freq", controlBox), 2, 2);
     controlLayout->addWidget(m_freqSpin, 2, 3);
     controlLayout->addWidget(new QLabel("Gain", controlBox), 3, 0);
     controlLayout->addWidget(m_gainSpin, 3, 1);
-    controlLayout->addWidget(new QLabel("FFT Size", controlBox), 3, 2);
-    controlLayout->addWidget(m_fftSpin, 3, 3);
-    controlLayout->addWidget(m_statusLabel, 4, 0, 1, 2);
-    controlLayout->addWidget(m_startButton, 4, 2);
-    controlLayout->addWidget(m_stopButton, 4, 3);
+    controlLayout->addWidget(new QLabel("Squelch", controlBox), 3, 2);
+    controlLayout->addWidget(m_squelchSpin, 3, 3);
+    controlLayout->addWidget(new QLabel("FFT Size", controlBox), 4, 2);
+    controlLayout->addWidget(m_fftSpin, 4, 3);
+    controlLayout->addWidget(m_statusLabel, 5, 0, 1, 2);
+    controlLayout->addWidget(m_startButton, 5, 2);
+    controlLayout->addWidget(m_stopButton, 5, 3);
 
     m_spectrumWidget = new SpectrumWidget(central);
     m_waterfallWidget = new WaterfallWidget(central);

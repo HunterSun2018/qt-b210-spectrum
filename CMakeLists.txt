@@ -14,6 +14,7 @@ find_package(Qt6 6.4 REQUIRED COMPONENTS Widgets)
 find_package(PkgConfig REQUIRED)
 find_package(Boost REQUIRED)
 
+pkg_check_modules(ALSA REQUIRED IMPORTED_TARGET alsa)
 pkg_check_modules(FFTW3 REQUIRED IMPORTED_TARGET fftw3)
 pkg_check_modules(UHD REQUIRED IMPORTED_TARGET uhd)
 
@@ -40,6 +41,7 @@ target_include_directories(qt6_b210_spectrum  PRIVATE src)
 target_link_libraries(qt6_b210_spectrum PRIVATE
         Boost::boost
         Qt6::Widgets
+        PkgConfig::ALSA
         PkgConfig::FFTW3
         PkgConfig::UHD
         fftw3f
