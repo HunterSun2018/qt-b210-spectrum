@@ -44,11 +44,11 @@ void MainWindow::startStreaming()
 {
     SdrWorker::Settings settings;
     settings.inputSource = m_sourceCombo->currentData().toInt() == 0
-        ? SdrWorker::InputSource::Usrp
-        : SdrWorker::InputSource::Simulator;
+                               ? SdrWorker::InputSource::Usrp
+                               : SdrWorker::InputSource::Simulator;
     settings.processorMode = m_processorCombo->currentData().toInt() == 0
-        ? SdrWorker::ProcessorMode::FloatFft
-        : SdrWorker::ProcessorMode::Int16Fftw;
+                                 ? SdrWorker::ProcessorMode::FloatFft
+                                 : SdrWorker::ProcessorMode::Int16Fftw;
     settings.demodMode = static_cast<SdrWorker::DemodMode>(m_demodCombo->currentData().toInt());
     settings.deviceArgs = m_deviceEdit->text();
     settings.sampleRate = m_rateSpin->value();
@@ -78,7 +78,8 @@ void MainWindow::handleSpectrum(const QVector<float> &spectrum)
 void MainWindow::handleStatus(const QString &status)
 {
     m_statusLabel->setText("Status: " + status);
-    if (status == "Stopped" || status == "Error") {
+    if (status == "Stopped" || status == "Error")
+    {
         m_startButton->setEnabled(true);
         m_stopButton->setEnabled(false);
     }
@@ -129,6 +130,11 @@ void MainWindow::buildUi()
     m_rateSpin->setSingleStep(1.0e5);
     m_rateSpin->setValue(1.0e6);
     m_rateSpin->setSuffix(" S/s");
+    connect(m_rateSpin, &QDoubleSpinBox::valueChanged, this,
+            [this](double value)
+            {
+                m_worker->setSampleRate(value);
+            });
 
     m_freqSpin = new QDoubleSpinBox(controlBox);
     m_freqSpin->setRange(7.0e7, 6.0e9);
@@ -136,6 +142,11 @@ void MainWindow::buildUi()
     m_freqSpin->setSingleStep(1.0e6);
     m_freqSpin->setValue(103.9e6);
     m_freqSpin->setSuffix(" Hz");
+    connect(m_freqSpin, &QDoubleSpinBox::valueChanged, this,
+            [this](double value)
+            {
+                m_worker->setCenterFreq(value);
+            });
 
     m_gainSpin = new QDoubleSpinBox(controlBox);
     m_gainSpin->setRange(0.0, 76.0);
@@ -143,6 +154,11 @@ void MainWindow::buildUi()
     m_gainSpin->setSingleStep(1.0);
     m_gainSpin->setValue(40.0);
     m_gainSpin->setSuffix(" dB");
+    connect(m_gainSpin, &QDoubleSpinBox::valueChanged, this,
+            [this](double value)
+            {
+                m_worker->setGain(value);
+            });
 
     m_squelchSpin = new QDoubleSpinBox(controlBox);
     m_squelchSpin->setRange(-120.0, 0.0);

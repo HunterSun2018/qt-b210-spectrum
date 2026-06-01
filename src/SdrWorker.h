@@ -8,6 +8,8 @@
 
 #include <QThread>
 
+#include <uhd/usrp/multi_usrp.hpp>
+
 class FftProcessor;
 
 class SdrWorker : public QThread
@@ -50,6 +52,12 @@ public:
     void startStreaming(const Settings &settings);
     void stopStreaming();
 
+    void setSampleRate(double sampleRate);
+    void setCenterFreq(double centerFreq);
+    void setGain(double gain);
+    void setSquelchDb(double squelchDb);
+    void setDemodMode(DemodMode mode);
+    
 signals:
     void spectrumReady(QVector<float> spectrum);
     void statusChanged(const QString &status);
@@ -61,4 +69,6 @@ protected:
 private:
     Settings m_settings;
     std::atomic_bool m_stopRequested;
+
+    uhd::usrp::multi_usrp::sptr m_usrp;
 };
