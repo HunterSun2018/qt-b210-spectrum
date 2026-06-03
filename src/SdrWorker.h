@@ -37,7 +37,8 @@ public:
         InputSource inputSource = InputSource::Usrp;
         ProcessorMode processorMode = ProcessorMode::FloatFft;
         DemodMode demodMode = DemodMode::None;
-        QString deviceArgs;
+        QString deviceArgs = "A";
+        QString rxFrontend = "A";
         double sampleRate = 1.0e6;
         double centerFreq = 103.9e6;
         double gain = 40.0;
@@ -52,6 +53,8 @@ public:
     void startStreaming(const Settings &settings);
     void stopStreaming();
 
+    void setRxFrontend(const QString &rxFrontend);
+    void setRxAntenna(const QString &antenna);
     void setSampleRate(double sampleRate);
     void setCenterFreq(double centerFreq);
     void setGain(double gain);

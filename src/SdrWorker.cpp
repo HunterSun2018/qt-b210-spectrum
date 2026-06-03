@@ -508,15 +508,27 @@ void SdrWorker::run()
 
         const std::string args = m_settings.deviceArgs.trimmed().toStdString();
         m_usrp = uhd::usrp::multi_usrp::make(args);
-        
 
         emit statusChanged("Configuring USRP...");
+
+        auto rx_subdev_spec = m_usrp->get_rx_subdev_spec();
+
+        auto subdev_spec = uhd::usrp::subdev_spec_t(QString("%1:%2").arg("A").arg(m_settings.rxFrontend).toStdString());
+        m_usrp->set_rx_subdev_spec(subdev_spec);
 
         m_usrp->set_rx_rate(m_settings.sampleRate);
         m_usrp->set_rx_freq(m_settings.centerFreq);
         m_usrp->set_rx_gain(m_settings.gain);
         m_usrp->set_rx_bandwidth(m_settings.sampleRate);
         m_usrp->set_rx_antenna(m_settings.antenna.toStdString());
+
+        size_t numChannels = m_usrp->get_rx_num_channels();
+
+        auto rx_info = m_usrp->get_usrp_rx_info(0);
+        for (auto info : std::map<std::string, std::string>(rx_info))
+        {
+            std::cout << "  " << info.first << ": " << info.second << std::endl;
+        }
 
         const bool useIqFftw = m_settings.processorMode == ProcessorMode::Int16Fftw;
         uhd::stream_args_t streamArgs(useIqFftw ? "sc16" : "fc32", "sc16");
@@ -621,26 +633,61 @@ void SdrWorker::run()
         emit statusChanged("Error");
     }
 }
+void SdrWorker::setRxFrontend(const QString &rxFrontend)
+{
+    m_settings.rxFrontend = rxFrontend;
+
+    if (m_usrp)
+    {
+        auto subdev_spec = uhd::usrp::subdev_spec_t(QString("%1:%2").arg("A").arg(rxFrontend).toStdString());
+        m_usrp->set_rx_subdev_spec(subdev_spec);
+
+        m_usrp->set_rx_rate(m_settings.sampleRate);
+        m_usrp->set_rx_freq(m_settings.centerFreq);
+        m_usrp->set_rx_gain(m_settings.gain);
+        m_usrp->set_rx_bandwidth(m_settings.sampleRate);
+        m_usrp->set_rx_antenna(m_settings.antenna.toStdString());
+    }
+}
+
+void SdrWorker::setRxAntenna(const QString &antenna)
+{
+    m_settings.antenna = antenna;
+
+    if (m_usrp)
+    {
+        m_usrp->set_rx_antenna(antenna.toStdString());
+    }
+}
 
 void SdrWorker::setSampleRate(double sampleRate)
 {
-    m_usrp->set_rx_rate(sampleRate);
-
     m_settings.sampleRate = sampleRate;
+
+    if (m_usrp)
+    {
+        m_usrp->set_rx_rate(sampleRate);
+    }
 }
 
 void SdrWorker::setCenterFreq(double centerFreq)
 {
     m_settings.centerFreq = centerFreq;
-    
-    m_usrp->set_rx_freq(centerFreq);
+
+    if (m_usrp)
+    {
+        m_usrp->set_rx_freq(centerFreq);
+    }
 }
 
 void SdrWorker::setGain(double gain)
 {
     m_settings.gain = gain;
-    
-    m_usrp->set_rx_gain(gain);
+
+    if (m_usrp)
+    {
+        m_usrp->set_rx_gain(gain);
+    }
 }
 
 void SdrWorker::setSquelchDb(double squelchDb)

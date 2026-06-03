@@ -51,6 +51,8 @@ void MainWindow::startStreaming()
                                  : SdrWorker::ProcessorMode::Int16Fftw;
     settings.demodMode = static_cast<SdrWorker::DemodMode>(m_demodCombo->currentData().toInt());
     settings.deviceArgs = m_deviceEdit->text();
+    settings.rxFrontend = m_rxFrontendCombo->currentText();
+    settings.antenna = m_rxAntennaCombo->currentText();
     settings.sampleRate = m_rateSpin->value();
     settings.centerFreq = m_freqSpin->value();
     settings.gain = m_gainSpin->value();
@@ -112,6 +114,26 @@ void MainWindow::buildUi()
     m_sourceCombo->addItem("USRP B210", 0);
     m_sourceCombo->addItem("Simulator", 1);
 
+    m_rxFrontendCombo = new QComboBox(controlBox);
+    m_rxFrontendCombo->addItem("A", 0);
+    m_rxFrontendCombo->addItem("B", 1);
+    connect(m_rxFrontendCombo, &QComboBox::currentIndexChanged, this,
+            [this](int index)
+            {
+                const QString &text = m_rxFrontendCombo->itemText(index);
+                m_worker->setRxFrontend(text);
+            });
+
+    m_rxAntennaCombo = new QComboBox(controlBox);
+    m_rxAntennaCombo->addItem("TX/RX", 0);
+    m_rxAntennaCombo->addItem("RX2", 1);
+    connect(m_rxAntennaCombo, &QComboBox::currentIndexChanged, this,
+            [this](int index)
+            {
+                const QString &antenna = m_rxAntennaCombo->itemText(index);
+                m_worker->setRxAntenna(antenna);
+            });
+
     m_processorCombo = new QComboBox(controlBox);
     m_processorCombo->addItem("FftProcessor", 0);
     m_processorCombo->addItem("IqFftwProcessor", 1);
@@ -121,7 +143,7 @@ void MainWindow::buildUi()
     m_demodCombo->addItem("FM", static_cast<int>(SdrWorker::DemodMode::FM));
     m_demodCombo->addItem("AM", static_cast<int>(SdrWorker::DemodMode::AM));
 
-    m_deviceEdit = new QLineEdit(controlBox);
+    m_deviceEdit = new QLineEdit();
     m_deviceEdit->setPlaceholderText("type=b200 or leave empty for auto-discovery");
 
     m_rateSpin = new QDoubleSpinBox(controlBox);
@@ -178,28 +200,40 @@ void MainWindow::buildUi()
 
     m_statusLabel = new QLabel("Status: Idle", controlBox);
 
-    controlLayout->addWidget(new QLabel("Source", controlBox), 0, 0);
+    controlLayout->addWidget(new QLabel("Source :", controlBox), 0, 0);
     controlLayout->addWidget(m_sourceCombo, 0, 1);
-    controlLayout->addWidget(new QLabel("Processor", controlBox), 0, 2);
-    controlLayout->addWidget(m_processorCombo, 0, 3);
-    controlLayout->addWidget(new QLabel("Demod", controlBox), 1, 0);
-    controlLayout->addWidget(m_demodCombo, 1, 1);
-    controlLayout->addWidget(new QLabel("Device Args", controlBox), 1, 2);
-    controlLayout->addWidget(m_deviceEdit, 1, 3);
-    controlLayout->addWidget(new QLabel("Sample Rate", controlBox), 2, 0);
-    controlLayout->addWidget(m_rateSpin, 2, 1);
-    controlLayout->addWidget(new QLabel("Center Freq", controlBox), 2, 2);
-    controlLayout->addWidget(m_freqSpin, 2, 3);
-    controlLayout->addWidget(new QLabel("Gain", controlBox), 3, 0);
-    controlLayout->addWidget(m_gainSpin, 3, 1);
-    controlLayout->addWidget(new QLabel("Squelch", controlBox), 3, 2);
-    controlLayout->addWidget(m_squelchSpin, 3, 3);
-    controlLayout->addWidget(new QLabel("FFT Size", controlBox), 4, 2);
-    controlLayout->addWidget(m_fftSpin, 4, 3);
-    controlLayout->addWidget(m_statusLabel, 5, 0, 1, 2);
-    controlLayout->addWidget(m_startButton, 5, 2);
-    controlLayout->addWidget(m_stopButton, 5, 3);
+    
+    controlLayout->addWidget(new QLabel("RX Frontend :", controlBox), 0, 2);
+    controlLayout->addWidget(m_rxFrontendCombo, 0, 3);
+    controlLayout->addWidget(new QLabel("RX Antenna :", controlBox), 0, 4);
+    controlLayout->addWidget(m_rxAntennaCombo, 0, 5);
 
+    controlLayout->addWidget(new QLabel("Processor :", controlBox), 1, 0);
+    controlLayout->addWidget(m_processorCombo, 1, 1);
+
+    controlLayout->addWidget(new QLabel("FFT Size :", controlBox), 1, 2);
+    controlLayout->addWidget(m_fftSpin, 1, 3);
+
+    controlLayout->addWidget(new QLabel("Demod :", controlBox), 1, 4);
+    controlLayout->addWidget(m_demodCombo, 1, 5);
+    // controlLayout->addWidget(new QLabel("Device Args :", controlBox), 1, 2);
+    // controlLayout->addWidget(m_deviceEdit, 1, 3);
+
+    // Row 2 has the main tuning controls
+    controlLayout->addWidget(new QLabel("Sample Rate :", controlBox), 2, 0);
+    controlLayout->addWidget(m_rateSpin, 2, 1);    
+    controlLayout->addWidget(new QLabel("Center Freq :", controlBox), 2, 2);
+    controlLayout->addWidget(m_freqSpin, 2, 3);
+    controlLayout->addWidget(new QLabel("Gain :", controlBox), 2, 4);
+    controlLayout->addWidget(m_gainSpin, 2, 5);
+    controlLayout->addWidget(new QLabel("Squelch :", controlBox), 2, 6);
+    controlLayout->addWidget(m_squelchSpin, 2, 7);
+
+    // Row 3 has the status and start/stop buttons
+    controlLayout->addWidget(m_statusLabel, 3, 0, 1, 2);
+    controlLayout->addWidget(m_startButton, 3, 4);
+    controlLayout->addWidget(m_stopButton, 3, 6);
+    
     m_spectrumWidget = new SpectrumWidget(central);
     m_waterfallWidget = new WaterfallWidget(central);
 

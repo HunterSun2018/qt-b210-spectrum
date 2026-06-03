@@ -34,6 +34,9 @@ private:
     void buildUi();
 
     QComboBox *m_sourceCombo = nullptr;
+    QComboBox *m_rxDboardCombo = nullptr;
+    QComboBox *m_rxFrontendCombo = nullptr;
+    QComboBox *m_rxAntennaCombo = nullptr;
     QComboBox *m_processorCombo = nullptr;
     QComboBox *m_demodCombo = nullptr;
     QLineEdit *m_deviceEdit = nullptr;
