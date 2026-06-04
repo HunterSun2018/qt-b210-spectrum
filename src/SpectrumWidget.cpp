@@ -49,7 +49,7 @@ void SpectrumWidget::paintEvent(QPaintEvent *event)
         painter.drawLine(drawRect.left(), y, drawRect.right(), y);
 
         const float db = m_maxDb - ((m_maxDb - m_minDb) * static_cast<float>(i) / 4.0f);
-        const QString label = QString::number(std::lround(db)) + " dB";
+        const QString label = QString::number(std::lround(db)) + " dBm";
         painter.setPen(QColor(180, 190, 205));
         painter.drawText(8, y - (metrics.height() / 2), 54, metrics.height(), Qt::AlignRight | Qt::AlignVCenter, label);
         painter.setPen(QColor(45, 58, 88));
@@ -89,7 +89,7 @@ void SpectrumWidget::paintEvent(QPaintEvent *event)
     }
 
     painter.setPen(QColor(220, 230, 245));
-    painter.drawText(drawRect.adjusted(6, 4, -6, -4), Qt::AlignTop | Qt::AlignLeft, "Spectrum (dBFS)");
+    painter.drawText(drawRect.adjusted(6, 4, -6, -4), Qt::AlignTop | Qt::AlignLeft, "Spectrum (dBm)");
     painter.drawText(10, drawRect.top() - 2, 50, metrics.height(), Qt::AlignRight | Qt::AlignVCenter, "Power");
     painter.drawText(drawRect.left(), drawRect.bottom() + 24, drawRect.width(), metrics.height(), Qt::AlignHCenter | Qt::AlignTop, "Frequency");
 }

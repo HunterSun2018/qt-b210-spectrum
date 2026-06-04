@@ -55,9 +55,9 @@ public:
 
     void setRxFrontend(const QString &rxFrontend);
     void setRxAntenna(const QString &antenna);
-    void setSampleRate(double sampleRate);
-    void setCenterFreq(double centerFreq);
-    void setGain(double gain);
+    void setRxSampleRate(double sampleRate);
+    void setFxCenterFreq(double centerFreq);
+    void setRxGain(double gain);
     void setSquelchDb(double squelchDb);
     void setDemodMode(DemodMode mode);
     

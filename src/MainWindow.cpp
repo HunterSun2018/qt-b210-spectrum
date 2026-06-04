@@ -142,6 +142,12 @@ void MainWindow::buildUi()
     m_demodCombo->addItem("Off", static_cast<int>(SdrWorker::DemodMode::None));
     m_demodCombo->addItem("FM", static_cast<int>(SdrWorker::DemodMode::FM));
     m_demodCombo->addItem("AM", static_cast<int>(SdrWorker::DemodMode::AM));
+    connect(m_demodCombo, &QComboBox::currentIndexChanged, this,
+            [this](int index)
+            {
+                const auto mode = static_cast<SdrWorker::DemodMode>(m_demodCombo->currentData().toInt());
+                m_worker->setDemodMode(mode);
+            });
 
     m_deviceEdit = new QLineEdit();
     m_deviceEdit->setPlaceholderText("type=b200 or leave empty for auto-discovery");
@@ -155,11 +161,11 @@ void MainWindow::buildUi()
     connect(m_rateSpin, &QDoubleSpinBox::valueChanged, this,
             [this](double value)
             {
-                m_worker->setSampleRate(value);
+                m_worker->setRxSampleRate(value);
             });
 
     m_freqSpin = new QDoubleSpinBox(controlBox);
-    m_freqSpin->setRange(7.0e7, 6.0e9);
+    m_freqSpin->setRange(50.0, 6.0e9);
     m_freqSpin->setDecimals(0);
     m_freqSpin->setSingleStep(1.0e6);
     m_freqSpin->setValue(103.9e6);
@@ -167,7 +173,7 @@ void MainWindow::buildUi()
     connect(m_freqSpin, &QDoubleSpinBox::valueChanged, this,
             [this](double value)
             {
-                m_worker->setCenterFreq(value);
+                m_worker->setFxCenterFreq(value);
             });
 
     m_gainSpin = new QDoubleSpinBox(controlBox);
@@ -179,7 +185,7 @@ void MainWindow::buildUi()
     connect(m_gainSpin, &QDoubleSpinBox::valueChanged, this,
             [this](double value)
             {
-                m_worker->setGain(value);
+                m_worker->setRxGain(value);
             });
 
     m_squelchSpin = new QDoubleSpinBox(controlBox);
@@ -202,7 +208,7 @@ void MainWindow::buildUi()
 
     controlLayout->addWidget(new QLabel("Source :", controlBox), 0, 0);
     controlLayout->addWidget(m_sourceCombo, 0, 1);
-    
+
     controlLayout->addWidget(new QLabel("RX Frontend :", controlBox), 0, 2);
     controlLayout->addWidget(m_rxFrontendCombo, 0, 3);
     controlLayout->addWidget(new QLabel("RX Antenna :", controlBox), 0, 4);
@@ -221,7 +227,7 @@ void MainWindow::buildUi()
 
     // Row 2 has the main tuning controls
     controlLayout->addWidget(new QLabel("Sample Rate :", controlBox), 2, 0);
-    controlLayout->addWidget(m_rateSpin, 2, 1);    
+    controlLayout->addWidget(m_rateSpin, 2, 1);
     controlLayout->addWidget(new QLabel("Center Freq :", controlBox), 2, 2);
     controlLayout->addWidget(m_freqSpin, 2, 3);
     controlLayout->addWidget(new QLabel("Gain :", controlBox), 2, 4);
@@ -233,7 +239,7 @@ void MainWindow::buildUi()
     controlLayout->addWidget(m_statusLabel, 3, 0, 1, 2);
     controlLayout->addWidget(m_startButton, 3, 4);
     controlLayout->addWidget(m_stopButton, 3, 6);
-    
+
     m_spectrumWidget = new SpectrumWidget(central);
     m_waterfallWidget = new WaterfallWidget(central);
 
