@@ -60,6 +60,7 @@ public:
     void setRxGain(double gain);
     void setSquelchDb(double squelchDb);
     void setDemodMode(DemodMode mode);
+    void setFftSize(std::size_t fftSize);
     
 signals:
     void spectrumReady(QVector<float> spectrum);

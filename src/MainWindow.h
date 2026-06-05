@@ -44,7 +44,7 @@ private:
     QDoubleSpinBox *m_freqSpin = nullptr;
     QDoubleSpinBox *m_gainSpin = nullptr;
     QDoubleSpinBox *m_squelchSpin = nullptr;
-    QSpinBox *m_fftSpin = nullptr;
+    QComboBox *m_fftSpin = nullptr;
     QPushButton *m_startButton = nullptr;
     QPushButton *m_stopButton = nullptr;
     QLabel *m_statusLabel = nullptr;

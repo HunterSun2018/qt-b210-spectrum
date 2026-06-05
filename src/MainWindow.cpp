@@ -57,7 +57,7 @@ void MainWindow::startStreaming()
     settings.centerFreq = m_freqSpin->value();
     settings.gain = m_gainSpin->value();
     settings.squelchDb = m_squelchSpin->value();
-    settings.fftSize = static_cast<std::size_t>(m_fftSpin->value());
+    settings.fftSize = static_cast<std::size_t>(m_fftSpin->currentData().toInt());
 
     m_startButton->setEnabled(false);
     m_stopButton->setEnabled(true);
@@ -195,10 +195,18 @@ void MainWindow::buildUi()
     m_squelchSpin->setValue(-55.0);
     m_squelchSpin->setSuffix(" dBFS");
 
-    m_fftSpin = new QSpinBox(controlBox);
-    m_fftSpin->setRange(256, 16384);
-    m_fftSpin->setSingleStep(256);
-    m_fftSpin->setValue(2048);
+    m_fftSpin = new QComboBox(controlBox);
+    m_fftSpin->addItem("1024", 1024);
+    m_fftSpin->addItem("2048", 2048);
+    m_fftSpin->addItem("4096", 4096);
+    m_fftSpin->addItem("8192", 8192);
+    m_fftSpin->setCurrentText("2048");
+    connect(m_fftSpin, &QComboBox::currentIndexChanged, this,
+            [this](int index)
+            {
+                const std::size_t fftSize = static_cast<std::size_t>(m_fftSpin->currentData().toInt());
+                m_worker->setFftSize(fftSize);
+            });
 
     m_startButton = new QPushButton("Start", controlBox);
     m_stopButton = new QPushButton("Stop", controlBox);

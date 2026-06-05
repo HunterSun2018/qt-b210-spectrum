@@ -40,6 +40,7 @@ namespace
     constexpr float kPilotLowpassHz = 400.0f;
     constexpr float kSignalPowerFloor = 1.0e-12f;
     constexpr std::size_t kMaxProcessingQueueDepth = 3;
+    constexpr double kTargetBufferDurationSeconds = 0.01;
 
     struct AudioPlaybackContext
     {
@@ -86,6 +87,21 @@ namespace
     };
 
     std::vector<std::complex<float>> generateSimulatedIq(std::size_t sampleCount, double sampleRate, std::size_t frameIndex);
+
+    std::size_t chooseSamplesPerBuffer(double sampleRate, std::size_t fftSize)
+    {
+        if (sampleRate <= 0.0)
+        {
+            return fftSize;
+        }
+
+        const auto targetSamples =
+            static_cast<std::size_t>(std::llround(sampleRate * kTargetBufferDurationSeconds));
+        const auto minimumSamples = fftSize;
+        const auto requestedSamples = std::max(minimumSamples, targetSamples);
+        const auto fftBlocks = std::max<std::size_t>(1, (requestedSamples + fftSize - 1) / fftSize);
+        return fftBlocks * fftSize;
+    }
 
     void closeAudioDevice(AudioPlaybackContext *context)
     {
@@ -172,7 +188,7 @@ namespace
         return filter->y;
     }
 
-    std::vector<std::complex<float>> convertSc16ToFloat(const std::vector<std::complex<std::int16_t>> &samples,
+    std::vector<std::complex<float>> convertSc16ToFloat(const std::complex<std::int16_t> *samples,
                                                         std::size_t count)
     {
         std::vector<std::complex<float>> converted(count);
@@ -183,6 +199,12 @@ namespace
                 static_cast<float>(samples[i].imag()) / kInt16FullScale);
         }
         return converted;
+    }
+
+    std::vector<std::complex<float>> convertSc16ToFloat(const std::vector<std::complex<std::int16_t>> &samples,
+                                                        std::size_t count)
+    {
+        return convertSc16ToFloat(samples.data(), count);
     }
 
     float estimateSignalPowerDbfs(const std::vector<std::complex<float>> &samples)
@@ -436,7 +458,7 @@ void SdrWorker::run()
 {
     const Settings &settings = m_settings;
     const std::size_t fftSize = std::max<std::size_t>(256, settings.fftSize);
-    const std::size_t samplesPerBuffer = fftSize * 4;
+    const std::size_t samplesPerBuffer = chooseSamplesPerBuffer(settings.sampleRate, fftSize);
     std::mutex queueMutex;
     std::condition_variable queueCv;
     std::deque<ProcessingFrame> processingQueue;
@@ -471,7 +493,7 @@ void SdrWorker::run()
         queueCv.notify_one();
     };
 
-    std::thread processingThread([&, &settings, fftSize]()
+    std::thread processingThread([&, settings, fftSize]()
                                  {
         try
         {
@@ -521,78 +543,140 @@ void SdrWorker::run()
                     continue;
                 }
 
-                std::vector<std::complex<float>> demodInput;
+                const std::size_t fftChunkCount = frame.received / fftSize;
+                std::vector<float> spectrumAccumulator(fftSize, 0.0f);
+                std::size_t processedSpectrumChunks = 0;
+
                 if (settings.processorMode == ProcessorMode::Int16Fftw)
                 {
-                    QVector<float> spectrum;
                     if (frame.usesInt16)
                     {
-                        spectrum = processWithIqFftw(
-                            iqProcessor,
-                            reinterpret_cast<const std::int16_t *>(frame.int16Samples.data()),
-                            frame.received * 2U,
-                            fftSize);
-                        if (settings.demodMode != DemodMode::None)
+                        for (std::size_t chunkIndex = 0; chunkIndex < fftChunkCount; ++chunkIndex)
                         {
-                            demodInput = convertSc16ToFloat(frame.int16Samples, frame.received);
+                            const auto *chunk = frame.int16Samples.data() + (chunkIndex * fftSize);
+                            const QVector<float> spectrum = processWithIqFftw(
+                                iqProcessor,
+                                reinterpret_cast<const std::int16_t *>(chunk),
+                                fftSize * 2U,
+                                fftSize);
+                            if (spectrum.isEmpty())
+                            {
+                                continue;
+                            }
+
+                            for (std::size_t i = 0; i < fftSize; ++i)
+                            {
+                                spectrumAccumulator[i] += spectrum[static_cast<int>(i)];
+                            }
+                            ++processedSpectrumChunks;
                         }
                     }
                     else
                     {
                         const std::vector<std::complex<std::int16_t>> quantized = quantizeToSc16(frame.floatSamples);
-                        spectrum = processWithIqFftw(
-                            iqProcessor,
-                            reinterpret_cast<const std::int16_t *>(quantized.data()),
-                            quantized.size() * 2U,
-                            fftSize);
-                        if (settings.demodMode != DemodMode::None)
+                        for (std::size_t chunkIndex = 0; chunkIndex < fftChunkCount; ++chunkIndex)
                         {
-                            demodInput = std::move(frame.floatSamples);
+                            const auto *chunk = quantized.data() + (chunkIndex * fftSize);
+                            const QVector<float> spectrum = processWithIqFftw(
+                                iqProcessor,
+                                reinterpret_cast<const std::int16_t *>(chunk),
+                                fftSize * 2U,
+                                fftSize);
+                            if (spectrum.isEmpty())
+                            {
+                                continue;
+                            }
+
+                            for (std::size_t i = 0; i < fftSize; ++i)
+                            {
+                                spectrumAccumulator[i] += spectrum[static_cast<int>(i)];
+                            }
+                            ++processedSpectrumChunks;
                         }
                     }
-
-                    if (spectrum.isEmpty())
-                    {
-                        continue;
-                    }
-                    emit spectrumReady(spectrum);
                 }
                 else
                 {
-                    std::vector<std::complex<float>> convertedInput;
                     if (frame.usesInt16)
                     {
-                        convertedInput = convertSc16ToFloat(frame.int16Samples, frame.received);
-                        if (settings.demodMode != DemodMode::None)
+                        for (std::size_t chunkIndex = 0; chunkIndex < fftChunkCount; ++chunkIndex)
                         {
-                            demodInput = convertedInput;
+                            const auto *chunk = frame.int16Samples.data() + (chunkIndex * fftSize);
+                            std::vector<std::complex<float>> convertedInput = convertSc16ToFloat(chunk, fftSize);
+                            const std::vector<float> spectrum = processor.process(convertedInput);
+                            if (spectrum.empty())
+                            {
+                                continue;
+                            }
+
+                            for (std::size_t i = 0; i < fftSize; ++i)
+                            {
+                                spectrumAccumulator[i] += spectrum[i];
+                            }
+                            ++processedSpectrumChunks;
                         }
                     }
-                    else if (settings.demodMode != DemodMode::None)
+                    else
                     {
-                        demodInput = frame.floatSamples;
-                    }
+                        for (std::size_t chunkIndex = 0; chunkIndex < fftChunkCount; ++chunkIndex)
+                        {
+                            const auto chunkOffset = static_cast<std::ptrdiff_t>(chunkIndex * fftSize);
+                            std::copy_n(frame.floatSamples.begin() + chunkOffset, fftSize, fftInput.begin());
+                            const std::vector<float> spectrum = processor.process(fftInput);
+                            if (spectrum.empty())
+                            {
+                                continue;
+                            }
 
-                    const std::vector<std::complex<float>> &fftSource =
-                        frame.usesInt16 ? convertedInput : frame.floatSamples;
-                    std::copy_n(fftSource.begin(), fftSize, fftInput.begin());
-                    const std::vector<float> spectrum = processor.process(fftInput);
-                    if (spectrum.empty())
-                    {
-                        continue;
+                            for (std::size_t i = 0; i < fftSize; ++i)
+                            {
+                                spectrumAccumulator[i] += spectrum[i];
+                            }
+                            ++processedSpectrumChunks;
+                        }
                     }
-                    emit spectrumReady(QVector<float>(spectrum.begin(), spectrum.end()));
                 }
 
-                if (settings.demodMode != DemodMode::None && !demodInput.empty())
+                if (processedSpectrumChunks == 0)
                 {
-                    writeAudioFrames(&audioContext,
-                                     demodulateAudio(
-                                         demodInput,
-                                         settings.sampleRate,
-                                         static_cast<float>(settings.squelchDb),
-                                         settings.demodMode,
-                                         &demodState));
+                    continue;
+                }
+
+                QVector<float> averagedSpectrum;
+                averagedSpectrum.reserve(static_cast<qsizetype>(fftSize));
+                const float spectrumScale = 1.0f / static_cast<float>(processedSpectrumChunks);
+                for (float value : spectrumAccumulator)
+                {
+                    averagedSpectrum.append(value * spectrumScale);
+                }
+                emit spectrumReady(averagedSpectrum);
+
+                if (settings.demodMode != DemodMode::None)
+                {
+                    for (std::size_t offset = 0; offset < frame.received; offset += fftSize)
+                    {
+                        const std::size_t chunkSize = std::min(fftSize, frame.received - offset);
+                        std::vector<std::complex<float>> demodInput;
+                        if (frame.usesInt16)
+                        {
+                            demodInput = convertSc16ToFloat(frame.int16Samples.data() + offset, chunkSize);
+                        }
+                        else
+                        {
+                            demodInput.resize(chunkSize);
+                            std::copy_n(frame.floatSamples.begin() + static_cast<std::ptrdiff_t>(offset),
+                                        static_cast<std::ptrdiff_t>(chunkSize),
+                                        demodInput.begin());
+                        }
+
+                        writeAudioFrames(&audioContext,
+                                         demodulateAudio(
+                                             demodInput,
+                                             settings.sampleRate,
+                                             static_cast<float>(settings.squelchDb),
+                                             settings.demodMode,
+                                             &demodState));
+                    }
                 }
             }
         }
@@ -622,7 +706,7 @@ void SdrWorker::run()
                     makeSimulatorBaseband(samplesPerBuffer, settings.sampleRate, frameIndex++, settings.demodMode);
                 enqueueFrame(std::move(frame));
 
-                const auto frameTime = std::chrono::duration<double>(static_cast<double>(fftSize) / settings.sampleRate);
+                const auto frameTime = std::chrono::duration<double>(static_cast<double>(samplesPerBuffer) / settings.sampleRate);
                 std::this_thread::sleep_for(frameTime);
             }
 
@@ -708,7 +792,7 @@ void SdrWorker::run()
             {
                 // throw std::runtime_error("RX error: " + metadata.strerror());
                 std::cout << "RX error: " << metadata.strerror() << std::endl;
-                continue;
+                // continue;
             }
 
             if (received < fftSize)
@@ -823,4 +907,9 @@ void SdrWorker::setSquelchDb(double squelchDb)
 void SdrWorker::setDemodMode(DemodMode mode)
 {
     m_settings.demodMode = mode;
+}
+
+void SdrWorker::setFftSize(std::size_t fftSize)
+{
+    m_settings.fftSize = fftSize;
 }
