@@ -51,5 +51,5 @@ private:
     SpectrumWidget *m_spectrumWidget = nullptr;
     WaterfallWidget *m_waterfallWidget = nullptr;
 
-    std::unique_ptr<SdrWorker> m_worker;
+    std::unique_ptr<SdrWorker> m_worker;    
 };

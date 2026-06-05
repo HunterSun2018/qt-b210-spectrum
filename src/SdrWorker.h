@@ -75,4 +75,5 @@ private:
     std::atomic_bool m_stopRequested;
 
     uhd::usrp::multi_usrp::sptr m_usrp;
+    std::size_t m_samplesPerBuffer;
 };

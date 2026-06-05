@@ -456,9 +456,10 @@ void SdrWorker::stopStreaming()
 
 void SdrWorker::run()
 {
-    const Settings &settings = m_settings;
-    const std::size_t fftSize = std::max<std::size_t>(256, settings.fftSize);
-    const std::size_t samplesPerBuffer = chooseSamplesPerBuffer(settings.sampleRate, fftSize);
+    Settings &settings = m_settings;
+    // const std::size_t fftSize = std::max<std::size_t>(256, settings.fftSize);
+    // auto &fftSize = settings.fftSize;
+    m_samplesPerBuffer = chooseSamplesPerBuffer(settings.sampleRate, settings.fftSize);
     std::mutex queueMutex;
     std::condition_variable queueCv;
     std::deque<ProcessingFrame> processingQueue;
@@ -493,12 +494,13 @@ void SdrWorker::run()
         queueCv.notify_one();
     };
 
-    std::thread processingThread([&, settings, fftSize]()
-                                 {
+    std::thread processingThread(
+        [&]()
+        {
         try
         {
-            std::vector<std::complex<float>> fftInput(fftSize);
-            FftProcessor processor(static_cast<int>(fftSize));
+            std::vector<std::complex<float>> fftInput(settings.fftSize);
+            auto processor = std::make_unique<FftProcessor>(static_cast<int>(settings.fftSize));
             DemodulatorState demodState;
             AudioPlaybackContext audioContext;
             auto audioGuard = std::unique_ptr<AudioPlaybackContext, decltype(&closeAudioDevice)>(&audioContext, closeAudioDevice);
@@ -508,7 +510,7 @@ void SdrWorker::run()
             }
 
             IqFftwProcessor iqProcessor;
-            if (iq_fftw_processor_init(&iqProcessor, fftSize) != IQ_FFTW_OK)
+            if (iq_fftw_processor_init(&iqProcessor, settings.fftSize) != IQ_FFTW_OK)
             {
                 throw std::runtime_error("Failed to initialize FFTW processor");
             }
@@ -518,6 +520,14 @@ void SdrWorker::run()
 
             while (true)
             {
+                auto fftSize = settings.fftSize;
+
+                if(fftInput.size() != fftSize)
+                {
+                    fftInput.resize(fftSize);
+                    processor =  std::make_unique<FftProcessor>(static_cast<int>(fftSize));
+                }
+
                 ProcessingFrame frame;
                 {
                     std::unique_lock<std::mutex> lock(queueMutex);
@@ -603,7 +613,7 @@ void SdrWorker::run()
                         {
                             const auto *chunk = frame.int16Samples.data() + (chunkIndex * fftSize);
                             std::vector<std::complex<float>> convertedInput = convertSc16ToFloat(chunk, fftSize);
-                            const std::vector<float> spectrum = processor.process(convertedInput);
+                            const std::vector<float> spectrum = processor->process(convertedInput);
                             if (spectrum.empty())
                             {
                                 continue;
@@ -622,7 +632,7 @@ void SdrWorker::run()
                         {
                             const auto chunkOffset = static_cast<std::ptrdiff_t>(chunkIndex * fftSize);
                             std::copy_n(frame.floatSamples.begin() + chunkOffset, fftSize, fftInput.begin());
-                            const std::vector<float> spectrum = processor.process(fftInput);
+                            const std::vector<float> spectrum = processor->process(fftInput);
                             if (spectrum.empty())
                             {
                                 continue;
@@ -701,12 +711,12 @@ void SdrWorker::run()
             while (!m_stopRequested)
             {
                 ProcessingFrame frame;
-                frame.received = samplesPerBuffer;
+                frame.received = m_samplesPerBuffer;
                 frame.floatSamples =
-                    makeSimulatorBaseband(samplesPerBuffer, settings.sampleRate, frameIndex++, settings.demodMode);
+                    makeSimulatorBaseband(m_samplesPerBuffer, settings.sampleRate, frameIndex++, settings.demodMode);
                 enqueueFrame(std::move(frame));
 
-                const auto frameTime = std::chrono::duration<double>(static_cast<double>(samplesPerBuffer) / settings.sampleRate);
+                const auto frameTime = std::chrono::duration<double>(static_cast<double>(m_samplesPerBuffer) / settings.sampleRate);
                 std::this_thread::sleep_for(frameTime);
             }
 
@@ -759,11 +769,11 @@ void SdrWorker::run()
         std::vector<std::complex<std::int16_t>> recvBufferInt16;
         if (useIqFftw)
         {
-            recvBufferInt16.resize(samplesPerBuffer);
+            recvBufferInt16.resize(m_samplesPerBuffer);
         }
         else
         {
-            recvBufferFloat.resize(samplesPerBuffer);
+            recvBufferFloat.resize(m_samplesPerBuffer);
         }
         uhd::rx_metadata_t metadata;
 
@@ -779,6 +789,15 @@ void SdrWorker::run()
 
         while (!m_stopRequested)
         {
+            if (useIqFftw && recvBufferInt16.size() != m_samplesPerBuffer)
+            {
+                recvBufferInt16.resize(m_samplesPerBuffer);
+            }
+            else if (!useIqFftw && recvBufferFloat.size() != m_samplesPerBuffer)
+            {
+                recvBufferFloat.resize(m_samplesPerBuffer);
+            }
+
             const std::size_t received = useIqFftw
                                              ? rxStreamer->recv(recvBufferInt16.data(), recvBufferInt16.size(), metadata, 0.25, false)
                                              : rxStreamer->recv(recvBufferFloat.data(), recvBufferFloat.size(), metadata, 0.25, false);
@@ -795,7 +814,7 @@ void SdrWorker::run()
                 // continue;
             }
 
-            if (received < fftSize)
+            if (received < m_samplesPerBuffer)
             {
                 continue;
             }
@@ -912,4 +931,6 @@ void SdrWorker::setDemodMode(DemodMode mode)
 void SdrWorker::setFftSize(std::size_t fftSize)
 {
     m_settings.fftSize = fftSize;
+
+    m_samplesPerBuffer = chooseSamplesPerBuffer(m_settings.sampleRate, fftSize);
 }
