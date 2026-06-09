@@ -557,7 +557,7 @@ void SdrWorker::run()
                 std::vector<float> spectrumAccumulator(fftSize, 0.0f);
                 std::size_t processedSpectrumChunks = 0;
 
-                if (settings.processorMode == ProcessorMode::Int16Fftw)
+                if (settings.fftProcessorMode == FftProcessorMode::IqFftwProcessor)
                 {
                     if (frame.usesInt16)
                     {
@@ -810,7 +810,7 @@ void SdrWorker::run()
             if (metadata.error_code != uhd::rx_metadata_t::ERROR_CODE_NONE)
             {
                 // throw std::runtime_error("RX error: " + metadata.strerror());
-                std::cout << "RX error: " << metadata.strerror() << std::endl;
+                std::cerr << "RX error: " << metadata.strerror() << std::endl;
                 // continue;
             }
 
@@ -926,6 +926,11 @@ void SdrWorker::setSquelchDb(double squelchDb)
 void SdrWorker::setDemodMode(DemodMode mode)
 {
     m_settings.demodMode = mode;
+}
+
+void SdrWorker::setFftProcessor(FftProcessorMode processor)
+{
+    m_settings.fftProcessorMode = processor;
 }
 
 void SdrWorker::setFftSize(std::size_t fftSize)

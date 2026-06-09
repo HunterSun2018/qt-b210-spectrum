@@ -22,6 +22,11 @@ public:
         Simulator
     };
 
+    enum class FftProcessorMode {
+        FftProcessor,
+        IqFftwProcessor
+    };
+
     enum class ProcessorMode {
         FloatFft,
         Int16Fftw
@@ -35,6 +40,7 @@ public:
 
     struct Settings {
         InputSource inputSource = InputSource::Usrp;
+        FftProcessorMode fftProcessorMode = FftProcessorMode::FftProcessor;
         ProcessorMode processorMode = ProcessorMode::FloatFft;
         DemodMode demodMode = DemodMode::None;
         QString deviceArgs = "A";
@@ -60,6 +66,8 @@ public:
     void setRxGain(double gain);
     void setSquelchDb(double squelchDb);
     void setDemodMode(DemodMode mode);
+    
+    void setFftProcessor(FftProcessorMode processor);
     void setFftSize(std::size_t fftSize);
     
 signals:

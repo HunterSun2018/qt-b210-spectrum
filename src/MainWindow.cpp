@@ -46,9 +46,9 @@ void MainWindow::startStreaming()
     settings.inputSource = m_sourceCombo->currentData().toInt() == 0
                                ? SdrWorker::InputSource::Usrp
                                : SdrWorker::InputSource::Simulator;
-    settings.processorMode = m_processorCombo->currentData().toInt() == 0
-                                 ? SdrWorker::ProcessorMode::FloatFft
-                                 : SdrWorker::ProcessorMode::Int16Fftw;
+    settings.fftProcessorMode = m_processorCombo->currentData().toInt() == 0
+                                  ? SdrWorker::FftProcessorMode::FftProcessor
+                                  : SdrWorker::FftProcessorMode::IqFftwProcessor;
     settings.demodMode = static_cast<SdrWorker::DemodMode>(m_demodCombo->currentData().toInt());
     settings.deviceArgs = m_deviceEdit->text();
     settings.rxFrontend = m_rxFrontendCombo->currentText();
@@ -137,6 +137,12 @@ void MainWindow::buildUi()
     m_processorCombo = new QComboBox(controlBox);
     m_processorCombo->addItem("FftProcessor", 0);
     m_processorCombo->addItem("IqFftwProcessor", 1);
+    connect(m_processorCombo, &QComboBox::currentIndexChanged, this,
+            [this](int index)
+            {
+                const auto mode = static_cast<SdrWorker::FftProcessorMode>(m_processorCombo->currentData().toInt());
+                m_worker->setFftProcessor(mode);
+            });
 
     m_demodCombo = new QComboBox(controlBox);
     m_demodCombo->addItem("Off", static_cast<int>(SdrWorker::DemodMode::None));
