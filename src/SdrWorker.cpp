@@ -504,7 +504,7 @@ void SdrWorker::run()
             DemodulatorState demodState;
             AudioPlaybackContext audioContext;
             auto audioGuard = std::unique_ptr<AudioPlaybackContext, decltype(&closeAudioDevice)>(&audioContext, closeAudioDevice);
-            if (settings.demodMode != DemodMode::None)
+            // if (settings.demodMode != DemodMode::None)
             {
                 openAudioDevice(&audioContext, kAudioSampleRate);
             }
