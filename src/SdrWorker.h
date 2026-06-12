@@ -8,6 +8,7 @@
 #include <exception>
 #include <memory>
 #include <mutex>
+#include <stop_token>
 #include <thread>
 #include <vector>
 
@@ -103,12 +104,13 @@ private:
     void stopWorkerThreads(bool emitStoppedStatus = true, bool rethrowError = true);
     void runSimulatorStream();
     void runUsrpStream();
-    void processingLoop();
-    void audioLoop();
+    void processingLoop(std::stop_token stopToken);
+    void audioLoop(std::stop_token stopToken);
     void enqueueProcessingFrame(ProcessingFrame &&frame);
     void enqueueAudioFrame(AudioFrame &&frame);
     void storeProcessingError(std::exception_ptr error);
     void rethrowProcessingError();
+    void requestWorkerStop();
 
     Settings m_settings;
     std::atomic_bool m_stopRequested;
@@ -117,11 +119,11 @@ private:
     std::size_t m_samplesPerBuffer;
 
     std::mutex m_processingQueueMutex;
-    std::condition_variable m_processingQueueCv;
+    std::condition_variable_any m_processingQueueCv;
     std::deque<ProcessingFrame> m_processingQueue;
 
     std::mutex m_audioQueueMutex;
-    std::condition_variable m_audioQueueCv;
+    std::condition_variable_any m_audioQueueCv;
     std::deque<AudioFrame> m_audioQueue;
 
     std::mutex m_processingErrorMutex;
@@ -129,6 +131,6 @@ private:
     std::atomic_bool m_producerDone{false};
     std::atomic_bool m_audioProducerDone{false};
 
-    std::thread m_processingThread;
-    std::thread m_audioThread;
+    std::jthread m_processingThread;
+    std::jthread m_audioThread;
 };

@@ -447,6 +447,7 @@ void SdrWorker::startStreaming(const Settings &settings)
 void SdrWorker::stopStreaming()
 {
     m_stopRequested = true;
+    requestWorkerStop();
 }
 
 void SdrWorker::run()
@@ -497,12 +498,13 @@ void SdrWorker::initializeRunState()
 
 void SdrWorker::startWorkerThreads()
 {
-    m_audioThread = std::thread(&SdrWorker::audioLoop, this);
-    m_processingThread = std::thread(&SdrWorker::processingLoop, this);
+    m_audioThread = std::jthread(&SdrWorker::audioLoop, this);
+    m_processingThread = std::jthread(&SdrWorker::processingLoop, this);
 }
 
 void SdrWorker::stopWorkerThreads(bool emitStoppedStatus, bool rethrowError)
 {
+    requestWorkerStop();
     m_producerDone = true;
     m_audioProducerDone = true;
     m_processingQueueCv.notify_all();
@@ -525,6 +527,20 @@ void SdrWorker::stopWorkerThreads(bool emitStoppedStatus, bool rethrowError)
     {
         emit statusChanged("Stopped");
     }
+}
+
+void SdrWorker::requestWorkerStop()
+{
+    if (m_processingThread.joinable())
+    {
+        m_processingThread.request_stop();
+    }
+    if (m_audioThread.joinable())
+    {
+        m_audioThread.request_stop();
+    }
+    m_processingQueueCv.notify_all();
+    m_audioQueueCv.notify_all();
 }
 
 void SdrWorker::runSimulatorStream()
@@ -645,7 +661,7 @@ void SdrWorker::runUsrpStream()
     rxStreamer->issue_stream_cmd(stopCmd);
 }
 
-void SdrWorker::processingLoop()
+void SdrWorker::processingLoop(std::stop_token stopToken)
 {
     try
     {
@@ -661,7 +677,7 @@ void SdrWorker::processingLoop()
         using IqProcessorGuard = std::unique_ptr<IqFftwProcessor, decltype(&iq_fftw_processor_destroy)>;
         auto iqProcessorGuard = IqProcessorGuard(&iqProcessor, iq_fftw_processor_destroy);
 
-        while (true)
+        while (!stopToken.stop_requested())
         {
             const auto fftSize = m_settings.fftSize;
 
@@ -674,13 +690,13 @@ void SdrWorker::processingLoop()
             ProcessingFrame frame;
             {
                 std::unique_lock<std::mutex> lock(m_processingQueueMutex);
-                m_processingQueueCv.wait(lock, [&] {
+                m_processingQueueCv.wait(lock, stopToken, [&] {
                     return m_producerDone || !m_processingQueue.empty() || m_stopRequested;
                 });
 
                 if (m_processingQueue.empty())
                 {
-                    if (m_producerDone || m_stopRequested)
+                    if (m_producerDone || m_stopRequested || stopToken.stop_requested())
                     {
                         break;
                     }
@@ -835,7 +851,7 @@ void SdrWorker::processingLoop()
     m_audioQueueCv.notify_all();
 }
 
-void SdrWorker::audioLoop()
+void SdrWorker::audioLoop(std::stop_token stopToken)
 {
     try
     {
@@ -848,18 +864,18 @@ void SdrWorker::audioLoop()
             openAudioDevice(&audioContext, kAudioSampleRate);
         }
 
-        while (true)
+        while (!stopToken.stop_requested())
         {
             AudioFrame frame;
             {
                 std::unique_lock<std::mutex> lock(m_audioQueueMutex);
-                m_audioQueueCv.wait(lock, [&] {
+                m_audioQueueCv.wait(lock, stopToken, [&] {
                     return m_audioProducerDone || !m_audioQueue.empty() || m_stopRequested;
                 });
 
                 if (m_audioQueue.empty())
                 {
-                    if (m_audioProducerDone || m_stopRequested)
+                    if (m_audioProducerDone || m_stopRequested || stopToken.stop_requested())
                     {
                         break;
                     }
@@ -927,6 +943,7 @@ void SdrWorker::storeProcessingError(std::exception_ptr error)
     }
 
     m_stopRequested = true;
+    requestWorkerStop();
     m_processingQueueCv.notify_all();
     m_audioQueueCv.notify_all();
 }
