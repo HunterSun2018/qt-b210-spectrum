@@ -43,7 +43,12 @@ namespace
     constexpr float kSignalPowerFloor = 1.0e-12f;
     constexpr std::size_t kMaxProcessingQueueDepth = 3;
     constexpr std::size_t kMaxAudioQueueDepth = 8;
+    constexpr std::size_t kMaxSpectrumChunksPerFrame = 8;
     constexpr double kTargetBufferDurationSeconds = 0.01;
+    constexpr double kFmChannelSampleRate = 240000.0;
+    constexpr double kAmChannelSampleRate = 96000.0;
+    constexpr double kFmChannelCutoffHz = 100000.0;
+    constexpr double kAmChannelCutoffHz = 9000.0;
 
     struct AudioPlaybackContext
     {
@@ -79,6 +84,22 @@ namespace
         SinglePoleFilter fmLeftDeemphasis;
         SinglePoleFilter fmRightDeemphasis;
         SinglePoleFilter amAudioFilter;
+    };
+
+    struct ChannelizerState
+    {
+        double inputSampleRate = 0.0;
+        double inputCenterFreq = 0.0;
+        double demodCenterFreq = 0.0;
+        double outputSampleRate = 0.0;
+        double ncoPhase = 0.0;
+        double ncoStep = 0.0;
+        float lpfAlpha = 1.0f;
+        std::size_t decimation = 1;
+        std::size_t decimationPhase = 0;
+        std::complex<float> decimationAccumulator{0.0f, 0.0f};
+        std::complex<float> filteredSample{0.0f, 0.0f};
+        SdrWorker::DemodMode mode = SdrWorker::DemodMode::None;
     };
 
     std::vector<std::complex<float>> generateSimulatedIq(std::size_t sampleCount, double sampleRate, std::size_t frameIndex);
@@ -200,6 +221,124 @@ namespace
                                                         std::size_t count)
     {
         return convertSc16ToFloat(samples.data(), count);
+    }
+
+    double targetDemodSampleRate(SdrWorker::DemodMode mode)
+    {
+        return mode == SdrWorker::DemodMode::FM ? kFmChannelSampleRate : kAmChannelSampleRate;
+    }
+
+    double targetDemodCutoffHz(SdrWorker::DemodMode mode)
+    {
+        return mode == SdrWorker::DemodMode::FM ? kFmChannelCutoffHz : kAmChannelCutoffHz;
+    }
+
+    void resetChannelizer(ChannelizerState *state,
+                          double inputSampleRate,
+                          double inputCenterFreq,
+                          double demodCenterFreq,
+                          SdrWorker::DemodMode mode)
+    {
+        if (state == nullptr)
+        {
+            return;
+        }
+
+        state->inputSampleRate = inputSampleRate;
+        state->inputCenterFreq = inputCenterFreq;
+        state->demodCenterFreq = demodCenterFreq;
+        state->mode = mode;
+        state->ncoPhase = 0.0;
+        state->decimationPhase = 0;
+        state->decimationAccumulator = {0.0f, 0.0f};
+        state->filteredSample = {0.0f, 0.0f};
+
+        const double targetRate = targetDemodSampleRate(mode);
+        state->decimation =
+            std::max<std::size_t>(1, static_cast<std::size_t>(std::floor(inputSampleRate / targetRate)));
+        state->outputSampleRate = inputSampleRate / static_cast<double>(state->decimation);
+
+        const double frequencyOffsetHz = std::clamp(
+            demodCenterFreq - inputCenterFreq,
+            -(inputSampleRate * 0.5),
+            inputSampleRate * 0.5);
+        state->ncoStep = -kTwoPi * (frequencyOffsetHz / inputSampleRate);
+
+        const double cutoffHz = std::min(targetDemodCutoffHz(mode), state->outputSampleRate * 0.45);
+        state->lpfAlpha = lowpassAlpha(cutoffHz, state->outputSampleRate);
+    }
+
+    bool channelizerNeedsReset(const ChannelizerState &state,
+                               double inputSampleRate,
+                               double inputCenterFreq,
+                               double demodCenterFreq,
+                               SdrWorker::DemodMode mode)
+    {
+        return state.mode != mode ||
+               state.inputSampleRate != inputSampleRate ||
+               state.inputCenterFreq != inputCenterFreq ||
+               state.demodCenterFreq != demodCenterFreq;
+    }
+
+    std::vector<std::complex<float>> extractDemodChannel(const std::vector<std::complex<float>> &samples,
+                                                         double inputSampleRate,
+                                                         double inputCenterFreq,
+                                                         double demodCenterFreq,
+                                                         SdrWorker::DemodMode mode,
+                                                         double *outputSampleRate,
+                                                         ChannelizerState *state)
+    {
+        if (outputSampleRate != nullptr)
+        {
+            *outputSampleRate = inputSampleRate;
+        }
+
+        if (samples.empty() || mode == SdrWorker::DemodMode::None || state == nullptr)
+        {
+            return {};
+        }
+
+        if (channelizerNeedsReset(*state, inputSampleRate, inputCenterFreq, demodCenterFreq, mode))
+        {
+            resetChannelizer(state, inputSampleRate, inputCenterFreq, demodCenterFreq, mode);
+        }
+
+        std::vector<std::complex<float>> channelized;
+        channelized.reserve(samples.size() / state->decimation + 1);
+        const float scale = 1.0f / static_cast<float>(state->decimation);
+
+        for (const auto &sample : samples)
+        {
+            const std::complex<float> oscillator(
+                static_cast<float>(std::cos(state->ncoPhase)),
+                static_cast<float>(std::sin(state->ncoPhase)));
+            state->ncoPhase += state->ncoStep;
+            if (state->ncoPhase > kTwoPi || state->ncoPhase < -kTwoPi)
+            {
+                state->ncoPhase = std::fmod(state->ncoPhase, static_cast<double>(kTwoPi));
+            }
+
+            state->decimationAccumulator += sample * oscillator;
+            ++state->decimationPhase;
+            if (state->decimationPhase < state->decimation)
+            {
+                continue;
+            }
+
+            const std::complex<float> averaged = state->decimationAccumulator * scale;
+            state->decimationAccumulator = {0.0f, 0.0f};
+            state->decimationPhase = 0;
+
+            state->filteredSample += state->lpfAlpha * (averaged - state->filteredSample);
+            channelized.push_back(state->filteredSample);
+        }
+
+        if (outputSampleRate != nullptr)
+        {
+            *outputSampleRate = state->outputSampleRate;
+        }
+
+        return channelized;
     }
 
     float estimateSignalPowerDbfs(const std::vector<std::complex<float>> &samples)
@@ -619,15 +758,24 @@ void SdrWorker::runUsrpStream()
     emit statusChanged(useInt16 ? "Streaming (USRP, IqFftwProcessor" + demodName + ")"
                                 : "Streaming (USRP, FftProcessor" + demodName + ")");
 
+    std::size_t bufferedSamples = 0;
     while (!m_stopRequested)
     {
+        const auto samplesRemaining = m_samplesPerBuffer - bufferedSamples;
         const std::size_t received = useInt16
-                                         ? rxStreamer->recv(recvBufferInt16.data(), recvBufferInt16.size(), metadata, 0.25, false)
-                                         : rxStreamer->recv(recvBufferFloat.data(), recvBufferFloat.size(), metadata, 0.25, false);
+                                         ? rxStreamer->recv(recvBufferInt16.data() + bufferedSamples, samplesRemaining, metadata, 0.25, false)
+                                         : rxStreamer->recv(recvBufferFloat.data() + bufferedSamples, samplesRemaining, metadata, 0.25, false);
 
         if (metadata.error_code == uhd::rx_metadata_t::ERROR_CODE_TIMEOUT)
         {
             std::cerr << "RX timeout: No samples received within the timeout period." << std::endl;
+            continue;
+        }
+
+        if (metadata.error_code == uhd::rx_metadata_t::ERROR_CODE_OVERFLOW)
+        {
+            std::cerr << "RX overflow: host processing fell behind, dropping buffered samples." << std::endl;
+            bufferedSamples = 0;
             continue;
         }
 
@@ -636,25 +784,32 @@ void SdrWorker::runUsrpStream()
             throw std::runtime_error(std::string("RX error: ") + metadata.strerror());
         }
 
-        if (received < m_samplesPerBuffer)
+        if (received == 0)
+        {
+            continue;
+        }
+
+        bufferedSamples += received;
+        if (bufferedSamples < m_samplesPerBuffer)
         {
             continue;
         }
 
         ProcessingFrame frame;
-        frame.received = received;
+        frame.received = bufferedSamples;
         frame.usesInt16 = useInt16;
         if (useInt16)
         {
-            frame.int16Samples.resize(received);
-            std::copy_n(recvBufferInt16.begin(), static_cast<std::ptrdiff_t>(received), frame.int16Samples.begin());
+            frame.int16Samples.resize(bufferedSamples);
+            std::copy_n(recvBufferInt16.begin(), static_cast<std::ptrdiff_t>(bufferedSamples), frame.int16Samples.begin());
         }
         else
         {
-            frame.floatSamples.resize(received);
-            std::copy_n(recvBufferFloat.begin(), static_cast<std::ptrdiff_t>(received), frame.floatSamples.begin());
+            frame.floatSamples.resize(bufferedSamples);
+            std::copy_n(recvBufferFloat.begin(), static_cast<std::ptrdiff_t>(bufferedSamples), frame.floatSamples.begin());
         }
         enqueueProcessingFrame(std::move(frame));
+        bufferedSamples = 0;
     }
 
     uhd::stream_cmd_t stopCmd(uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS);
@@ -667,6 +822,7 @@ void SdrWorker::processingLoop(std::stop_token stopToken)
     {
         std::vector<std::complex<float>> fftInput(m_settings.fftSize);
         auto processor = std::make_unique<FftProcessor>(static_cast<int>(m_settings.fftSize));
+        ChannelizerState channelizerState;
 
         IqFftwProcessor iqProcessor;
         if (iq_fftw_processor_init(&iqProcessor, m_settings.fftSize) != IQ_FFTW_OK)
@@ -713,6 +869,7 @@ void SdrWorker::processingLoop(std::stop_token stopToken)
             }
 
             const std::size_t fftChunkCount = frame.received / fftSize;
+            const std::size_t spectrumChunkCount = std::min(fftChunkCount, kMaxSpectrumChunksPerFrame);
             std::vector<float> spectrumAccumulator(fftSize, 0.0f);
             std::size_t processedSpectrumChunks = 0;
 
@@ -720,8 +877,9 @@ void SdrWorker::processingLoop(std::stop_token stopToken)
             {
                 if (frame.usesInt16)
                 {
-                    for (std::size_t chunkIndex = 0; chunkIndex < fftChunkCount; ++chunkIndex)
+                    for (std::size_t spectrumChunk = 0; spectrumChunk < spectrumChunkCount; ++spectrumChunk)
                     {
+                        const std::size_t chunkIndex = (spectrumChunk * fftChunkCount) / spectrumChunkCount;
                         const auto *chunk = frame.int16Samples.data() + (chunkIndex * fftSize);
                         const QVector<float> spectrum = processWithIqFftw(
                             iqProcessor,
@@ -743,8 +901,9 @@ void SdrWorker::processingLoop(std::stop_token stopToken)
                 else
                 {
                     const std::vector<std::complex<std::int16_t>> quantized = quantizeToSc16(frame.floatSamples);
-                    for (std::size_t chunkIndex = 0; chunkIndex < fftChunkCount; ++chunkIndex)
+                    for (std::size_t spectrumChunk = 0; spectrumChunk < spectrumChunkCount; ++spectrumChunk)
                     {
+                        const std::size_t chunkIndex = (spectrumChunk * fftChunkCount) / spectrumChunkCount;
                         const auto *chunk = quantized.data() + (chunkIndex * fftSize);
                         const QVector<float> spectrum = processWithIqFftw(
                             iqProcessor,
@@ -768,8 +927,9 @@ void SdrWorker::processingLoop(std::stop_token stopToken)
             {
                 if (frame.usesInt16)
                 {
-                    for (std::size_t chunkIndex = 0; chunkIndex < fftChunkCount; ++chunkIndex)
+                    for (std::size_t spectrumChunk = 0; spectrumChunk < spectrumChunkCount; ++spectrumChunk)
                     {
+                        const std::size_t chunkIndex = (spectrumChunk * fftChunkCount) / spectrumChunkCount;
                         const auto *chunk = frame.int16Samples.data() + (chunkIndex * fftSize);
                         std::vector<std::complex<float>> convertedInput = convertSc16ToFloat(chunk, fftSize);
                         const std::vector<float> spectrum = processor->process(convertedInput);
@@ -787,8 +947,9 @@ void SdrWorker::processingLoop(std::stop_token stopToken)
                 }
                 else
                 {
-                    for (std::size_t chunkIndex = 0; chunkIndex < fftChunkCount; ++chunkIndex)
+                    for (std::size_t spectrumChunk = 0; spectrumChunk < spectrumChunkCount; ++spectrumChunk)
                     {
+                        const std::size_t chunkIndex = (spectrumChunk * fftChunkCount) / spectrumChunkCount;
                         const auto chunkOffset = static_cast<std::ptrdiff_t>(chunkIndex * fftSize);
                         std::copy_n(frame.floatSamples.begin() + chunkOffset, fftSize, fftInput.begin());
                         const std::vector<float> spectrum = processor->process(fftInput);
@@ -822,21 +983,40 @@ void SdrWorker::processingLoop(std::stop_token stopToken)
 
             if (m_settings.demodMode != DemodMode::None)
             {
+                const double inputCenterFreq = m_settings.centerFreq;
+                const double demodCenterFreq = m_settings.demodCenterFreq;
+                const double inputSampleRate = m_settings.sampleRate;
                 if (frame.usesInt16)
                 {
+                    double demodSampleRate = inputSampleRate;
+                    auto demodSamples = extractDemodChannel(convertSc16ToFloat(frame.int16Samples, frame.received),
+                                                            inputSampleRate,
+                                                            inputCenterFreq,
+                                                            demodCenterFreq,
+                                                            m_settings.demodMode,
+                                                            &demodSampleRate,
+                                                            &channelizerState);
                     enqueueAudioFrame(
-                        AudioFrame{m_settings.sampleRate,
+                        AudioFrame{demodSampleRate,
                                    static_cast<float>(m_settings.squelchDb),
                                    m_settings.demodMode,
-                                   convertSc16ToFloat(frame.int16Samples, frame.received)});
+                                   std::move(demodSamples)});
                 }
                 else
                 {
+                    double demodSampleRate = inputSampleRate;
                     AudioFrame audioFrame;
-                    audioFrame.sampleRate = m_settings.sampleRate;
+                    audioFrame.sampleRate = demodSampleRate;
                     audioFrame.squelchDb = static_cast<float>(m_settings.squelchDb);
                     audioFrame.demodMode = m_settings.demodMode;
-                    audioFrame.samples = std::move(frame.floatSamples);
+                    audioFrame.samples = extractDemodChannel(frame.floatSamples,
+                                                             inputSampleRate,
+                                                             inputCenterFreq,
+                                                             demodCenterFreq,
+                                                             m_settings.demodMode,
+                                                             &demodSampleRate,
+                                                             &channelizerState);
+                    audioFrame.sampleRate = demodSampleRate;
                     enqueueAudioFrame(std::move(audioFrame));
                 }
             }
@@ -1001,6 +1181,11 @@ void SdrWorker::setFxCenterFreq(double centerFreq)
     {
         m_usrp->set_rx_freq(centerFreq);
     }
+}
+
+void SdrWorker::setDemodCenterFreq(double centerFreq)
+{
+    m_settings.demodCenterFreq = centerFreq;
 }
 
 void SdrWorker::setRxGain(double gain)

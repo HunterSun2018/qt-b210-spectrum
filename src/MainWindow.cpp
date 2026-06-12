@@ -26,6 +26,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_stopButton, &QPushButton::clicked, this, &MainWindow::stopStreaming);
     connect(m_rateSpin, &QDoubleSpinBox::valueChanged, this, &MainWindow::updateSpectrumAxes);
     connect(m_freqSpin, &QDoubleSpinBox::valueChanged, this, &MainWindow::updateSpectrumAxes);
+    connect(m_demodFreqSpin, &QDoubleSpinBox::valueChanged, this, &MainWindow::updateSpectrumAxes);
 
     connect(m_worker.get(), &SdrWorker::spectrumReady, this, &MainWindow::handleSpectrum);
     connect(m_worker.get(), &SdrWorker::statusChanged, this, &MainWindow::handleStatus);
@@ -55,6 +56,7 @@ void MainWindow::startStreaming()
     settings.antenna = m_rxAntennaCombo->currentText();
     settings.sampleRate = m_rateSpin->value();
     settings.centerFreq = m_freqSpin->value();
+    settings.demodCenterFreq = m_demodFreqSpin->value();
     settings.gain = m_gainSpin->value();
     settings.squelchDb = m_squelchSpin->value();
     settings.fftSize = static_cast<std::size_t>(m_fftSpin->currentData().toInt());
@@ -95,6 +97,9 @@ void MainWindow::handleError(const QString &errorText)
 void MainWindow::updateSpectrumAxes()
 {
     m_spectrumWidget->setFrequencySpan(m_freqSpin->value(), m_rateSpin->value());
+    m_spectrumWidget->setDemodMarker(
+        m_demodFreqSpin->value(),
+        static_cast<SdrWorker::DemodMode>(m_demodCombo->currentData().toInt()) != SdrWorker::DemodMode::None);
 }
 
 void MainWindow::buildUi()
@@ -151,8 +156,10 @@ void MainWindow::buildUi()
     connect(m_demodCombo, &QComboBox::currentIndexChanged, this,
             [this](int index)
             {
+                Q_UNUSED(index);
                 const auto mode = static_cast<SdrWorker::DemodMode>(m_demodCombo->currentData().toInt());
                 m_worker->setDemodMode(mode);
+                updateSpectrumAxes();
             });
 
     m_deviceEdit = new QLineEdit();
@@ -180,6 +187,18 @@ void MainWindow::buildUi()
             [this](double value)
             {
                 m_worker->setFxCenterFreq(value);
+            });
+
+    m_demodFreqSpin = new QDoubleSpinBox(controlBox);
+    m_demodFreqSpin->setRange(50.0, 6.0e9);
+    m_demodFreqSpin->setDecimals(0);
+    m_demodFreqSpin->setSingleStep(1.0e5);
+    m_demodFreqSpin->setValue(103.9e6);
+    m_demodFreqSpin->setSuffix(" Hz");
+    connect(m_demodFreqSpin, &QDoubleSpinBox::valueChanged, this,
+            [this](double value)
+            {
+                m_worker->setDemodCenterFreq(value);
             });
 
     m_gainSpin = new QDoubleSpinBox(controlBox);
@@ -227,6 +246,8 @@ void MainWindow::buildUi()
     controlLayout->addWidget(m_rxFrontendCombo, 0, 3);
     controlLayout->addWidget(new QLabel("RX Antenna :", controlBox), 0, 4);
     controlLayout->addWidget(m_rxAntennaCombo, 0, 5);
+    controlLayout->addWidget(new QLabel("Gain :", controlBox), 0, 6);
+    controlLayout->addWidget(m_gainSpin, 0, 7);
 
     controlLayout->addWidget(new QLabel("Processor :", controlBox), 1, 0);
     controlLayout->addWidget(m_processorCombo, 1, 1);
@@ -236,6 +257,8 @@ void MainWindow::buildUi()
 
     controlLayout->addWidget(new QLabel("Demod :", controlBox), 1, 4);
     controlLayout->addWidget(m_demodCombo, 1, 5);
+     controlLayout->addWidget(new QLabel("Squelch :", controlBox), 1, 6);
+    controlLayout->addWidget(m_squelchSpin, 1, 7);
     // controlLayout->addWidget(new QLabel("Device Args :", controlBox), 1, 2);
     // controlLayout->addWidget(m_deviceEdit, 1, 3);
 
@@ -244,15 +267,15 @@ void MainWindow::buildUi()
     controlLayout->addWidget(m_rateSpin, 2, 1);
     controlLayout->addWidget(new QLabel("Center Freq :", controlBox), 2, 2);
     controlLayout->addWidget(m_freqSpin, 2, 3);
-    controlLayout->addWidget(new QLabel("Gain :", controlBox), 2, 4);
-    controlLayout->addWidget(m_gainSpin, 2, 5);
-    controlLayout->addWidget(new QLabel("Squelch :", controlBox), 2, 6);
-    controlLayout->addWidget(m_squelchSpin, 2, 7);
+    controlLayout->addWidget(new QLabel("Demod Freq :", controlBox), 2, 4);
+    controlLayout->addWidget(m_demodFreqSpin, 2, 5);
+    
+   
 
     // Row 3 has the status and start/stop buttons
-    controlLayout->addWidget(m_statusLabel, 3, 0, 1, 2);
-    controlLayout->addWidget(m_startButton, 3, 4);
-    controlLayout->addWidget(m_stopButton, 3, 6);
+    controlLayout->addWidget(m_statusLabel, 4, 0, 1, 2);
+    controlLayout->addWidget(m_startButton, 4, 4);
+    controlLayout->addWidget(m_stopButton, 4, 6);
 
     m_spectrumWidget = new SpectrumWidget(central);
     m_waterfallWidget = new WaterfallWidget(central);

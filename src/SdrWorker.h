@@ -53,6 +53,7 @@ public:
         QString rxFrontend = "A";
         double sampleRate = 1.0e6;
         double centerFreq = 103.9e6;
+        double demodCenterFreq = 103.9e6;
         double gain = 40.0;
         QString antenna = "TX/RX";
         double squelchDb = -55.0;
@@ -69,6 +70,7 @@ public:
     void setRxAntenna(const QString &antenna);
     void setRxSampleRate(double sampleRate);
     void setFxCenterFreq(double centerFreq);
+    void setDemodCenterFreq(double centerFreq);
     void setRxGain(double gain);
     void setSquelchDb(double squelchDb);
     void setDemodMode(DemodMode mode);

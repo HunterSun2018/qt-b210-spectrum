@@ -20,6 +20,13 @@ void SpectrumWidget::setFrequencySpan(double centerFreqHz, double sampleRateHz)
     update();
 }
 
+void SpectrumWidget::setDemodMarker(double demodFreqHz, bool enabled)
+{
+    m_demodFreqHz = demodFreqHz;
+    m_demodMarkerEnabled = enabled;
+    update();
+}
+
 void SpectrumWidget::setSpectrum(const QVector<float> &spectrum)
 {
     m_spectrum = spectrum;
@@ -84,8 +91,23 @@ void SpectrumWidget::paintEvent(QPaintEvent *event)
         }
 
         painter.setPen(QPen(QColor(66, 220, 163), 0.8));
-        
+
         painter.drawPath(path);
+    }
+
+    if (m_demodMarkerEnabled && m_sampleRateHz > 0.0) {
+        const double spanStart = m_centerFreqHz - (m_sampleRateHz * 0.5);
+        const double spanEnd = m_centerFreqHz + (m_sampleRateHz * 0.5);
+        if (m_demodFreqHz >= spanStart && m_demodFreqHz <= spanEnd) {
+            const double normalized = (m_demodFreqHz - spanStart) / m_sampleRateHz;
+            const qreal x = drawRect.left() + (drawRect.width() * normalized);
+            painter.setPen(QPen(QColor(255, 184, 76), 1.0, Qt::DashLine));
+            painter.drawLine(QPointF(x, drawRect.top()), QPointF(x, drawRect.bottom()));
+            painter.setPen(QColor(255, 214, 160));
+            painter.drawText(QRectF(x - 80.0, drawRect.top() + 4.0, 160.0, metrics.height()),
+                             Qt::AlignHCenter | Qt::AlignTop,
+                             "Demod");
+        }
     }
 
     painter.setPen(QColor(220, 230, 245));

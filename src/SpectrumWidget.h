@@ -10,6 +10,7 @@ class SpectrumWidget : public QWidget
 public:
     explicit SpectrumWidget(QWidget *parent = nullptr);
     void setFrequencySpan(double centerFreqHz, double sampleRateHz);
+    void setDemodMarker(double demodFreqHz, bool enabled);
 
 public slots:
     void setSpectrum(const QVector<float> &spectrum);
@@ -25,4 +26,6 @@ private:
     float m_maxDb = 0.0f;
     double m_centerFreqHz = 2.45e9;
     double m_sampleRateHz = 2.0e6;
+    double m_demodFreqHz = 2.45e9;
+    bool m_demodMarkerEnabled = false;
 };

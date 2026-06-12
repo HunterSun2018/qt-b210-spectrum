@@ -42,6 +42,7 @@ private:
     QLineEdit *m_deviceEdit = nullptr;
     QDoubleSpinBox *m_rateSpin = nullptr;
     QDoubleSpinBox *m_freqSpin = nullptr;
+    QDoubleSpinBox *m_demodFreqSpin = nullptr;
     QDoubleSpinBox *m_gainSpin = nullptr;
     QDoubleSpinBox *m_squelchSpin = nullptr;
     QComboBox *m_fftSpin = nullptr;
