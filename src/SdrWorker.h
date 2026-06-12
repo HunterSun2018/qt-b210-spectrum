@@ -1,9 +1,14 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <complex>
+#include <deque>
+#include <exception>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 #include <QThread>
@@ -79,9 +84,51 @@ protected:
     void run() override;
 
 private:
+    struct ProcessingFrame {
+        std::size_t received = 0;
+        bool usesInt16 = false;
+        std::vector<std::complex<float>> floatSamples;
+        std::vector<std::complex<std::int16_t>> int16Samples;
+    };
+
+    struct AudioFrame {
+        double sampleRate = 0.0;
+        float squelchDb = 0.0f;
+        DemodMode demodMode = DemodMode::None;
+        std::vector<std::complex<float>> samples;
+    };
+
+    void initializeRunState();
+    void startWorkerThreads();
+    void stopWorkerThreads(bool emitStoppedStatus = true, bool rethrowError = true);
+    void runSimulatorStream();
+    void runUsrpStream();
+    void processingLoop();
+    void audioLoop();
+    void enqueueProcessingFrame(ProcessingFrame &&frame);
+    void enqueueAudioFrame(AudioFrame &&frame);
+    void storeProcessingError(std::exception_ptr error);
+    void rethrowProcessingError();
+
     Settings m_settings;
     std::atomic_bool m_stopRequested;
 
     uhd::usrp::multi_usrp::sptr m_usrp;
     std::size_t m_samplesPerBuffer;
+
+    std::mutex m_processingQueueMutex;
+    std::condition_variable m_processingQueueCv;
+    std::deque<ProcessingFrame> m_processingQueue;
+
+    std::mutex m_audioQueueMutex;
+    std::condition_variable m_audioQueueCv;
+    std::deque<AudioFrame> m_audioQueue;
+
+    std::mutex m_processingErrorMutex;
+    std::exception_ptr m_processingError;
+    std::atomic_bool m_producerDone{false};
+    std::atomic_bool m_audioProducerDone{false};
+
+    std::thread m_processingThread;
+    std::thread m_audioThread;
 };
