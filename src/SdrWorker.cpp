@@ -40,6 +40,7 @@ namespace
     constexpr float kPilotLowpassHz = 400.0f;
     constexpr float kSignalPowerFloor = 1.0e-12f;
     constexpr std::size_t kMaxProcessingQueueDepth = 3;
+    constexpr std::size_t kMaxAudioQueueDepth = 8;
     constexpr double kTargetBufferDurationSeconds = 0.01;
 
     struct AudioPlaybackContext
@@ -84,6 +85,14 @@ namespace
         bool usesInt16 = false;
         std::vector<std::complex<float>> floatSamples;
         std::vector<std::complex<std::int16_t>> int16Samples;
+    };
+
+    struct AudioFrame
+    {
+        double sampleRate = 0.0;
+        float squelchDb = 0.0f;
+        SdrWorker::DemodMode demodMode = SdrWorker::DemodMode::None;
+        std::vector<std::complex<float>> samples;
     };
 
     std::vector<std::complex<float>> generateSimulatedIq(std::size_t sampleCount, double sampleRate, std::size_t frameIndex);
@@ -463,9 +472,13 @@ void SdrWorker::run()
     std::mutex queueMutex;
     std::condition_variable queueCv;
     std::deque<ProcessingFrame> processingQueue;
+    std::mutex audioQueueMutex;
+    std::condition_variable audioQueueCv;
+    std::deque<AudioFrame> audioQueue;
     std::mutex processingErrorMutex;
     std::exception_ptr processingError;
     std::atomic_bool producerDone{false};
+    std::atomic_bool audioProducerDone{false};
 
     auto storeProcessingError = [&](std::exception_ptr error)
     {
@@ -494,206 +507,262 @@ void SdrWorker::run()
         queueCv.notify_one();
     };
 
+    auto enqueueAudioFrame = [&](AudioFrame &&frame)
+    {
+        if (m_stopRequested || frame.samples.empty() || frame.demodMode == DemodMode::None)
+        {
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(audioQueueMutex);
+        if (audioQueue.size() >= kMaxAudioQueueDepth)
+        {
+            audioQueue.pop_front();
+        }
+        audioQueue.push_back(std::move(frame));
+        audioQueueCv.notify_one();
+    };
+
+    std::thread audioThread(
+        [&]()
+        {
+            try
+            {
+                DemodulatorState demodState;
+                AudioPlaybackContext audioContext;
+                auto audioGuard =
+                    std::unique_ptr<AudioPlaybackContext, decltype(&closeAudioDevice)>(&audioContext, closeAudioDevice);
+                if (settings.demodMode != DemodMode::None)
+                {
+                    openAudioDevice(&audioContext, kAudioSampleRate);
+                }
+
+                while (true)
+                {
+                    AudioFrame frame;
+                    {
+                        std::unique_lock<std::mutex> lock(audioQueueMutex);
+                        audioQueueCv.wait(lock, [&] {
+                            return audioProducerDone || !audioQueue.empty() || m_stopRequested;
+                        });
+
+                        if (audioQueue.empty())
+                        {
+                            if (audioProducerDone || m_stopRequested)
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+
+                        frame = std::move(audioQueue.front());
+                        audioQueue.pop_front();
+                    }
+
+                    writeAudioFrames(&audioContext,
+                                     demodulateAudio(frame.samples,
+                                                     frame.sampleRate,
+                                                     frame.squelchDb,
+                                                     frame.demodMode,
+                                                     &demodState));
+                }
+            }
+            catch (...)
+            {
+                storeProcessingError(std::current_exception());
+            }
+        });
+
     std::thread processingThread(
         [&]()
         {
-        try
-        {
-            std::vector<std::complex<float>> fftInput(settings.fftSize);
-            auto processor = std::make_unique<FftProcessor>(static_cast<int>(settings.fftSize));
-            DemodulatorState demodState;
-            AudioPlaybackContext audioContext;
-            auto audioGuard = std::unique_ptr<AudioPlaybackContext, decltype(&closeAudioDevice)>(&audioContext, closeAudioDevice);
-            // if (settings.demodMode != DemodMode::None)
+            try
             {
-                openAudioDevice(&audioContext, kAudioSampleRate);
-            }
+                std::vector<std::complex<float>> fftInput(settings.fftSize);
+                auto processor = std::make_unique<FftProcessor>(static_cast<int>(settings.fftSize));
 
-            IqFftwProcessor iqProcessor;
-            if (iq_fftw_processor_init(&iqProcessor, settings.fftSize) != IQ_FFTW_OK)
-            {
-                throw std::runtime_error("Failed to initialize FFTW processor");
-            }
-
-            using IqProcessorGuard = std::unique_ptr<IqFftwProcessor, decltype(&iq_fftw_processor_destroy)>;
-            auto iqProcessorGuard = IqProcessorGuard(&iqProcessor, iq_fftw_processor_destroy);
-
-            while (true)
-            {
-                auto fftSize = settings.fftSize;
-
-                if(fftInput.size() != fftSize)
+                IqFftwProcessor iqProcessor;
+                if (iq_fftw_processor_init(&iqProcessor, settings.fftSize) != IQ_FFTW_OK)
                 {
-                    fftInput.resize(fftSize);
-                    processor =  std::make_unique<FftProcessor>(static_cast<int>(fftSize));
+                    throw std::runtime_error("Failed to initialize FFTW processor");
                 }
 
-                ProcessingFrame frame;
-                {
-                    std::unique_lock<std::mutex> lock(queueMutex);
-                    queueCv.wait(lock, [&] {
-                        return producerDone || !processingQueue.empty() || m_stopRequested;
-                    });
+                using IqProcessorGuard = std::unique_ptr<IqFftwProcessor, decltype(&iq_fftw_processor_destroy)>;
+                auto iqProcessorGuard = IqProcessorGuard(&iqProcessor, iq_fftw_processor_destroy);
 
-                    if (processingQueue.empty())
+                while (true)
+                {
+                    auto fftSize = settings.fftSize;
+
+                    if (fftInput.size() != fftSize)
                     {
-                        if (producerDone || m_stopRequested)
+                        fftInput.resize(fftSize);
+                        processor = std::make_unique<FftProcessor>(static_cast<int>(fftSize));
+                    }
+
+                    ProcessingFrame frame;
+                    {
+                        std::unique_lock<std::mutex> lock(queueMutex);
+                        queueCv.wait(lock, [&] {
+                            return producerDone || !processingQueue.empty() || m_stopRequested;
+                        });
+
+                        if (processingQueue.empty())
                         {
-                            break;
+                            if (producerDone || m_stopRequested)
+                            {
+                                break;
+                            }
+                            continue;
                         }
+
+                        frame = std::move(processingQueue.front());
+                        processingQueue.pop_front();
+                    }
+
+                    if (frame.received < fftSize)
+                    {
                         continue;
                     }
 
-                    frame = std::move(processingQueue.front());
-                    processingQueue.pop_front();
-                }
+                    const std::size_t fftChunkCount = frame.received / fftSize;
+                    std::vector<float> spectrumAccumulator(fftSize, 0.0f);
+                    std::size_t processedSpectrumChunks = 0;
 
-                if (frame.received < fftSize)
-                {
-                    continue;
-                }
-
-                const std::size_t fftChunkCount = frame.received / fftSize;
-                std::vector<float> spectrumAccumulator(fftSize, 0.0f);
-                std::size_t processedSpectrumChunks = 0;
-
-                if (settings.fftProcessorMode == FftProcessorMode::IqFftwProcessor)
-                {
-                    if (frame.usesInt16)
+                    if (settings.fftProcessorMode == FftProcessorMode::IqFftwProcessor)
                     {
-                        for (std::size_t chunkIndex = 0; chunkIndex < fftChunkCount; ++chunkIndex)
-                        {
-                            const auto *chunk = frame.int16Samples.data() + (chunkIndex * fftSize);
-                            const QVector<float> spectrum = processWithIqFftw(
-                                iqProcessor,
-                                reinterpret_cast<const std::int16_t *>(chunk),
-                                fftSize * 2U,
-                                fftSize);
-                            if (spectrum.isEmpty())
-                            {
-                                continue;
-                            }
-
-                            for (std::size_t i = 0; i < fftSize; ++i)
-                            {
-                                spectrumAccumulator[i] += spectrum[static_cast<int>(i)];
-                            }
-                            ++processedSpectrumChunks;
-                        }
-                    }
-                    else
-                    {
-                        const std::vector<std::complex<std::int16_t>> quantized = quantizeToSc16(frame.floatSamples);
-                        for (std::size_t chunkIndex = 0; chunkIndex < fftChunkCount; ++chunkIndex)
-                        {
-                            const auto *chunk = quantized.data() + (chunkIndex * fftSize);
-                            const QVector<float> spectrum = processWithIqFftw(
-                                iqProcessor,
-                                reinterpret_cast<const std::int16_t *>(chunk),
-                                fftSize * 2U,
-                                fftSize);
-                            if (spectrum.isEmpty())
-                            {
-                                continue;
-                            }
-
-                            for (std::size_t i = 0; i < fftSize; ++i)
-                            {
-                                spectrumAccumulator[i] += spectrum[static_cast<int>(i)];
-                            }
-                            ++processedSpectrumChunks;
-                        }
-                    }
-                }
-                else
-                {
-                    if (frame.usesInt16)
-                    {
-                        for (std::size_t chunkIndex = 0; chunkIndex < fftChunkCount; ++chunkIndex)
-                        {
-                            const auto *chunk = frame.int16Samples.data() + (chunkIndex * fftSize);
-                            std::vector<std::complex<float>> convertedInput = convertSc16ToFloat(chunk, fftSize);
-                            const std::vector<float> spectrum = processor->process(convertedInput);
-                            if (spectrum.empty())
-                            {
-                                continue;
-                            }
-
-                            for (std::size_t i = 0; i < fftSize; ++i)
-                            {
-                                spectrumAccumulator[i] += spectrum[i];
-                            }
-                            ++processedSpectrumChunks;
-                        }
-                    }
-                    else
-                    {
-                        for (std::size_t chunkIndex = 0; chunkIndex < fftChunkCount; ++chunkIndex)
-                        {
-                            const auto chunkOffset = static_cast<std::ptrdiff_t>(chunkIndex * fftSize);
-                            std::copy_n(frame.floatSamples.begin() + chunkOffset, fftSize, fftInput.begin());
-                            const std::vector<float> spectrum = processor->process(fftInput);
-                            if (spectrum.empty())
-                            {
-                                continue;
-                            }
-
-                            for (std::size_t i = 0; i < fftSize; ++i)
-                            {
-                                spectrumAccumulator[i] += spectrum[i];
-                            }
-                            ++processedSpectrumChunks;
-                        }
-                    }
-                }
-
-                if (processedSpectrumChunks == 0)
-                {
-                    continue;
-                }
-
-                QVector<float> averagedSpectrum;
-                averagedSpectrum.reserve(static_cast<qsizetype>(fftSize));
-                const float spectrumScale = 1.0f / static_cast<float>(processedSpectrumChunks);
-                for (float value : spectrumAccumulator)
-                {
-                    averagedSpectrum.append(value * spectrumScale);
-                }
-                emit spectrumReady(averagedSpectrum);
-
-                if (settings.demodMode != DemodMode::None)
-                {
-                    for (std::size_t offset = 0; offset < frame.received; offset += fftSize)
-                    {
-                        const std::size_t chunkSize = std::min(fftSize, frame.received - offset);
-                        std::vector<std::complex<float>> demodInput;
                         if (frame.usesInt16)
                         {
-                            demodInput = convertSc16ToFloat(frame.int16Samples.data() + offset, chunkSize);
+                            for (std::size_t chunkIndex = 0; chunkIndex < fftChunkCount; ++chunkIndex)
+                            {
+                                const auto *chunk = frame.int16Samples.data() + (chunkIndex * fftSize);
+                                const QVector<float> spectrum = processWithIqFftw(
+                                    iqProcessor,
+                                    reinterpret_cast<const std::int16_t *>(chunk),
+                                    fftSize * 2U,
+                                    fftSize);
+                                if (spectrum.isEmpty())
+                                {
+                                    continue;
+                                }
+
+                                for (std::size_t i = 0; i < fftSize; ++i)
+                                {
+                                    spectrumAccumulator[i] += spectrum[static_cast<int>(i)];
+                                }
+                                ++processedSpectrumChunks;
+                            }
                         }
                         else
                         {
-                            demodInput.resize(chunkSize);
-                            std::copy_n(frame.floatSamples.begin() + static_cast<std::ptrdiff_t>(offset),
-                                        static_cast<std::ptrdiff_t>(chunkSize),
-                                        demodInput.begin());
-                        }
+                            const std::vector<std::complex<std::int16_t>> quantized = quantizeToSc16(frame.floatSamples);
+                            for (std::size_t chunkIndex = 0; chunkIndex < fftChunkCount; ++chunkIndex)
+                            {
+                                const auto *chunk = quantized.data() + (chunkIndex * fftSize);
+                                const QVector<float> spectrum = processWithIqFftw(
+                                    iqProcessor,
+                                    reinterpret_cast<const std::int16_t *>(chunk),
+                                    fftSize * 2U,
+                                    fftSize);
+                                if (spectrum.isEmpty())
+                                {
+                                    continue;
+                                }
 
-                        writeAudioFrames(&audioContext,
-                                         demodulateAudio(
-                                             demodInput,
-                                             settings.sampleRate,
-                                             static_cast<float>(settings.squelchDb),
-                                             settings.demodMode,
-                                             &demodState));
+                                for (std::size_t i = 0; i < fftSize; ++i)
+                                {
+                                    spectrumAccumulator[i] += spectrum[static_cast<int>(i)];
+                                }
+                                ++processedSpectrumChunks;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        if (frame.usesInt16)
+                        {
+                            for (std::size_t chunkIndex = 0; chunkIndex < fftChunkCount; ++chunkIndex)
+                            {
+                                const auto *chunk = frame.int16Samples.data() + (chunkIndex * fftSize);
+                                std::vector<std::complex<float>> convertedInput = convertSc16ToFloat(chunk, fftSize);
+                                const std::vector<float> spectrum = processor->process(convertedInput);
+                                if (spectrum.empty())
+                                {
+                                    continue;
+                                }
+
+                                for (std::size_t i = 0; i < fftSize; ++i)
+                                {
+                                    spectrumAccumulator[i] += spectrum[i];
+                                }
+                                ++processedSpectrumChunks;
+                            }
+                        }
+                        else
+                        {
+                            for (std::size_t chunkIndex = 0; chunkIndex < fftChunkCount; ++chunkIndex)
+                            {
+                                const auto chunkOffset = static_cast<std::ptrdiff_t>(chunkIndex * fftSize);
+                                std::copy_n(frame.floatSamples.begin() + chunkOffset, fftSize, fftInput.begin());
+                                const std::vector<float> spectrum = processor->process(fftInput);
+                                if (spectrum.empty())
+                                {
+                                    continue;
+                                }
+
+                                for (std::size_t i = 0; i < fftSize; ++i)
+                                {
+                                    spectrumAccumulator[i] += spectrum[i];
+                                }
+                                ++processedSpectrumChunks;
+                            }
+                        }
+                    }
+
+                    if (processedSpectrumChunks == 0)
+                    {
+                        continue;
+                    }
+
+                    QVector<float> averagedSpectrum;
+                    averagedSpectrum.reserve(static_cast<qsizetype>(fftSize));
+                    const float spectrumScale = 1.0f / static_cast<float>(processedSpectrumChunks);
+                    for (float value : spectrumAccumulator)
+                    {
+                        averagedSpectrum.append(value * spectrumScale);
+                    }
+                    emit spectrumReady(averagedSpectrum);
+
+                    if (settings.demodMode != DemodMode::None)
+                    {
+                        if (frame.usesInt16)
+                        {
+                            enqueueAudioFrame(
+                                AudioFrame{settings.sampleRate,
+                                           static_cast<float>(settings.squelchDb),
+                                           settings.demodMode,
+                                           convertSc16ToFloat(frame.int16Samples, frame.received)});
+                        }
+                        else
+                        {
+                            AudioFrame audioFrame;
+                            audioFrame.sampleRate = settings.sampleRate;
+                            audioFrame.squelchDb = static_cast<float>(settings.squelchDb);
+                            audioFrame.demodMode = settings.demodMode;
+                            audioFrame.samples = std::move(frame.floatSamples);
+                            enqueueAudioFrame(std::move(audioFrame));
+                        }
                     }
                 }
             }
-        }
-        catch (...)
-        {
-            storeProcessingError(std::current_exception());
-        } });
+            catch (...)
+            {
+                storeProcessingError(std::current_exception());
+            }
+
+            audioProducerDone = true;
+            audioQueueCv.notify_all();
+        });
 
     try
     {
@@ -723,6 +792,10 @@ void SdrWorker::run()
             producerDone = true;
             queueCv.notify_all();
             processingThread.join();
+            if (audioThread.joinable())
+            {
+                audioThread.join();
+            }
             {
                 std::lock_guard<std::mutex> lock(processingErrorMutex);
                 if (processingError != nullptr)
@@ -761,13 +834,13 @@ void SdrWorker::run()
             std::cout << "  " << info.first << ": " << info.second << std::endl;
         }
 
-        const bool useIqFftw = settings.processorMode == ProcessorMode::Int16Fftw;
-        uhd::stream_args_t streamArgs(useIqFftw ? "sc16" : "fc32", "sc16");
+        const bool useInt16F = settings.processorMode == ProcessorMode::Int16Fftw;
+        uhd::stream_args_t streamArgs(useInt16F ? "sc16" : "fc32", "sc16");
         auto rxStreamer = m_usrp->get_rx_stream(streamArgs);
 
         std::vector<std::complex<float>> recvBufferFloat;
         std::vector<std::complex<std::int16_t>> recvBufferInt16;
-        if (useIqFftw)
+        if (useInt16F)
         {
             recvBufferInt16.resize(m_samplesPerBuffer);
         }
@@ -784,26 +857,27 @@ void SdrWorker::run()
         const QString demodName = settings.demodMode == DemodMode::FM
                                       ? ", FM"
                                       : (settings.demodMode == DemodMode::AM ? ", AM" : "");
-        emit statusChanged(useIqFftw ? "Streaming (USRP, IqFftwProcessor" + demodName + ")"
+        emit statusChanged(useInt16F ? "Streaming (USRP, IqFftwProcessor" + demodName + ")"
                                      : "Streaming (USRP, FftProcessor" + demodName + ")");
 
         while (!m_stopRequested)
         {
-            if (useIqFftw && recvBufferInt16.size() != m_samplesPerBuffer)
+            if (useInt16F && recvBufferInt16.size() != m_samplesPerBuffer)
             {
                 recvBufferInt16.resize(m_samplesPerBuffer);
             }
-            else if (!useIqFftw && recvBufferFloat.size() != m_samplesPerBuffer)
+            else if (!useInt16F && recvBufferFloat.size() != m_samplesPerBuffer)
             {
                 recvBufferFloat.resize(m_samplesPerBuffer);
             }
 
-            const std::size_t received = useIqFftw
+            const std::size_t received = useInt16F
                                              ? rxStreamer->recv(recvBufferInt16.data(), recvBufferInt16.size(), metadata, 0.25, false)
                                              : rxStreamer->recv(recvBufferFloat.data(), recvBufferFloat.size(), metadata, 0.25, false);
 
             if (metadata.error_code == uhd::rx_metadata_t::ERROR_CODE_TIMEOUT)
             {
+                std::cerr << "RX timeout: No samples received within the timeout period." << std::endl;
                 continue;
             }
 
@@ -821,8 +895,8 @@ void SdrWorker::run()
 
             ProcessingFrame frame;
             frame.received = received;
-            frame.usesInt16 = useIqFftw;
-            if (useIqFftw)
+            frame.usesInt16 = useInt16F;
+            if (useInt16F)
             {
                 frame.int16Samples.resize(received);
                 std::copy_n(recvBufferInt16.begin(), static_cast<std::ptrdiff_t>(received), frame.int16Samples.begin());
@@ -840,6 +914,10 @@ void SdrWorker::run()
         producerDone = true;
         queueCv.notify_all();
         processingThread.join();
+        if (audioThread.joinable())
+        {
+            audioThread.join();
+        }
         {
             std::lock_guard<std::mutex> lock(processingErrorMutex);
             if (processingError != nullptr)
@@ -856,6 +934,12 @@ void SdrWorker::run()
         if (processingThread.joinable())
         {
             processingThread.join();
+        }
+        audioProducerDone = true;
+        audioQueueCv.notify_all();
+        if (audioThread.joinable())
+        {
+            audioThread.join();
         }
         emit errorOccurred(QString::fromStdString(ex.what()));
         emit statusChanged("Error");
