@@ -1,5 +1,7 @@
 #include "MainWindow.h"
 
+#include <cmath>
+
 #include <QDoubleSpinBox>
 #include <QComboBox>
 #include <QGridLayout>
@@ -34,7 +36,11 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_spectrumWidget, &SpectrumWidget::demodFrequencySelected, this,
             [this](double frequencyHz)
             {
-                m_demodFreqSpin->setValue(frequencyHz);
+                const auto [bandwidthHz, tunedFrequencyHz] =
+                    m_worker->calculateSignalBandwidthAndFreq(static_cast<std::size_t>(std::llround(frequencyHz)),
+                                                              static_cast<std::size_t>(std::llround(m_rateSpin->value())));
+                Q_UNUSED(bandwidthHz);
+                m_demodFreqSpin->setValue(tunedFrequencyHz);
             });
 
     updateSpectrumAxes();

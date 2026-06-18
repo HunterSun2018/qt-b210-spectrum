@@ -10,6 +10,7 @@
 #include <mutex>
 #include <stop_token>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #include <QThread>
@@ -77,6 +78,8 @@ public:
     
     void setFftProcessor(FftProcessorMode processor);
     void setFftSize(std::size_t fftSize);       
+
+    std::tuple<std::size_t, double> calculateSignalBandwidthAndFreq(std::size_t freq, std::size_t sampleRate) const;
 
 signals:
     void spectrumReady(QVector<float> spectrum);

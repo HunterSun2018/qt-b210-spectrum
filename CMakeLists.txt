@@ -34,6 +34,8 @@ qt_add_executable(qt6_b210_spectrum
     src/WaterfallWidget.h
     src/IqFftwProcessor.c
     src/IqFftwProcessor.h
+    src/SignalProcessor.cpp
+    src/SignalProcessor.h
 )
 
 target_include_directories(qt6_b210_spectrum  PRIVATE src)

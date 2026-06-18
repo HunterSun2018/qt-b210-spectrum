@@ -1,4 +1,5 @@
 #include "SdrWorker.h"
+#include "SignalProcessor.h"
 
 #include <algorithm>
 #include <chrono>
@@ -570,6 +571,49 @@ SdrWorker::~SdrWorker()
     wait();
 }
 
+std::tuple<std::size_t, double> SdrWorker::calculateSignalBandwidthAndFreq(std::size_t freq,
+                                                                           std::size_t sampleRate) const
+{
+    if (sampleRate == 0)
+    {
+        return {0, static_cast<double>(freq)};
+    }
+
+    std::size_t bandwidth = sampleRate / 2;
+    double centerFrequency = static_cast<double>(freq);
+
+    switch (m_settings.demodMode)
+    {
+    case DemodMode::FM:
+    {
+        constexpr std::size_t kFmBroadcastBandwidthHz = 320000;
+        constexpr double kFmChannelStepHz = 200000.0;
+        constexpr double kFmChannelOffsetHz = 100000.0;
+
+        bandwidth = std::min<std::size_t>(kFmBroadcastBandwidthHz, sampleRate);
+        centerFrequency =
+            (std::round((static_cast<double>(freq) - kFmChannelOffsetHz) / kFmChannelStepHz) *
+             kFmChannelStepHz) +
+            kFmChannelOffsetHz;
+        break;
+    }
+    case DemodMode::AM:
+    {
+        constexpr std::size_t kAmBandwidthHz = 10000;
+        constexpr double kAmChannelStepHz = 10000.0;
+
+        bandwidth = std::min<std::size_t>(kAmBandwidthHz, sampleRate);
+        centerFrequency = std::round(static_cast<double>(freq) / kAmChannelStepHz) * kAmChannelStepHz;
+        break;
+    }
+    case DemodMode::None:
+    default:
+        break;
+    }
+
+    return {bandwidth, centerFrequency};
+}
+
 void SdrWorker::startStreaming(const Settings &settings)
 {
     if (isRunning())
@@ -846,9 +890,8 @@ void SdrWorker::processingLoop(std::stop_token stopToken)
             ProcessingFrame frame;
             {
                 std::unique_lock<std::mutex> lock(m_processingQueueMutex);
-                m_processingQueueCv.wait(lock, stopToken, [&] {
-                    return m_producerDone || !m_processingQueue.empty() || m_stopRequested;
-                });
+                m_processingQueueCv.wait(lock, stopToken, [&]
+                                         { return m_producerDone || !m_processingQueue.empty() || m_stopRequested; });
 
                 if (m_processingQueue.empty())
                 {
@@ -963,6 +1006,38 @@ void SdrWorker::processingLoop(std::stop_token stopToken)
                             spectrumAccumulator[i] += spectrum[i];
                         }
                         ++processedSpectrumChunks;
+
+                        // estimate signal center frequency and print it every 100 chunks
+                        auto signal_estimate = estimate_signal(fftInput, m_settings.sampleRate, m_settings.centerFreq, fftSize);
+                        if (signal_estimate.has_value())
+                        {
+                            static std::vector<double> recent_estimates;
+
+                            if (recent_estimates.size() > 100)
+                            {
+                                recent_estimates.clear();
+                            }
+
+                            recent_estimates.push_back(signal_estimate->signal_center_Hz);
+
+                            if (recent_estimates.size() == 100)
+                            {
+                                // auto average = accumulate(recent_estimates.begin(), recent_estimates.end(), 0.0) / 100.0;
+                                // std::time_t time = std::time({});
+                                // char timeString[64] = {0};
+                                // std::strftime(std::data(timeString), std::size(timeString),
+                                //               "%x %EX", std::localtime(&time));
+ 
+                                auto m = recent_estimates.begin() + recent_estimates.size() / 2;
+                                std::nth_element(recent_estimates.begin(), m ,recent_estimates.end());
+                                average = recent_estimates[recent_estimates.size() / 2];
+
+                                std::cout << timeString << ", "
+                                          << "Signal center frequency: " << average << " Hz, "
+                                          //   << signal_estimate->power_dbfs << " dBFS"
+                                          << std::endl;
+                            }
+                        }
                     }
                 }
             }
@@ -1049,9 +1124,8 @@ void SdrWorker::audioLoop(std::stop_token stopToken)
             AudioFrame frame;
             {
                 std::unique_lock<std::mutex> lock(m_audioQueueMutex);
-                m_audioQueueCv.wait(lock, stopToken, [&] {
-                    return m_audioProducerDone || !m_audioQueue.empty() || m_stopRequested;
-                });
+                m_audioQueueCv.wait(lock, stopToken, [&]
+                                    { return m_audioProducerDone || !m_audioQueue.empty() || m_stopRequested; });
 
                 if (m_audioQueue.empty())
                 {
