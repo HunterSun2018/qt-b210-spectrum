@@ -76,8 +76,8 @@ public:
     void setDemodMode(DemodMode mode);
     
     void setFftProcessor(FftProcessorMode processor);
-    void setFftSize(std::size_t fftSize);
-    
+    void setFftSize(std::size_t fftSize);       
+
 signals:
     void spectrumReady(QVector<float> spectrum);
     void statusChanged(const QString &status);

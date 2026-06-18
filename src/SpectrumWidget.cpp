@@ -6,11 +6,13 @@
 #include <QPainter>
 #include <QPaintEvent>
 #include <QPainterPath>
+#include <QMouseEvent>
 
 SpectrumWidget::SpectrumWidget(QWidget *parent)
     : QWidget(parent)
 {
     setMinimumHeight(240);
+    setMouseTracking(true);
 }
 
 void SpectrumWidget::setFrequencySpan(double centerFreqHz, double sampleRateHz)
@@ -33,6 +35,45 @@ void SpectrumWidget::setSpectrum(const QVector<float> &spectrum)
     update();
 }
 
+void SpectrumWidget::mouseMoveEvent(QMouseEvent *event)
+{
+    double frequencyHz = 0.0;
+    float levelDb = 0.0f;
+    int binIndex = -1;
+    m_hoverActive = tryMapFromPosition(event->position().toPoint(), &frequencyHz, &levelDb, &binIndex);
+    if (m_hoverActive)
+    {
+        m_hoverPosition = event->position().toPoint();
+        m_hoverFrequencyHz = frequencyHz;
+        m_hoverLevelDb = levelDb;
+        m_hoverBinIndex = binIndex;
+    }
+    update();
+    QWidget::mouseMoveEvent(event);
+}
+
+void SpectrumWidget::leaveEvent(QEvent *event)
+{
+    m_hoverActive = false;
+    update();
+    QWidget::leaveEvent(event);
+}
+
+void SpectrumWidget::mousePressEvent(QMouseEvent *event)
+{
+    if (event->button() == Qt::LeftButton)
+    {
+        double frequencyHz = 0.0;
+        if (tryMapFromPosition(event->position().toPoint(), &frequencyHz, nullptr, nullptr))
+        {
+            emit demodFrequencySelected(frequencyHz);
+            event->accept();
+            return;
+        }
+    }
+    QWidget::mousePressEvent(event);
+}
+
 void SpectrumWidget::paintEvent(QPaintEvent *event)
 {
     Q_UNUSED(event);
@@ -41,7 +82,7 @@ void SpectrumWidget::paintEvent(QPaintEvent *event)
     painter.fillRect(rect(), QColor(10, 14, 24));
     painter.setRenderHint(QPainter::Antialiasing, true);
 
-    const QRect drawRect = rect().adjusted(70, 18, -18, -42);
+    const QRect drawRect = spectrumDrawRect();
     if (drawRect.width() <= 0 || drawRect.height() <= 0) {
         return;
     }
@@ -110,10 +151,90 @@ void SpectrumWidget::paintEvent(QPaintEvent *event)
         }
     }
 
+    if (m_hoverActive)
+    {
+        const qreal x = std::clamp(static_cast<qreal>(m_hoverPosition.x()),
+                                   static_cast<qreal>(drawRect.left()),
+                                   static_cast<qreal>(drawRect.right()));
+        const qreal y = std::clamp(static_cast<qreal>(m_hoverPosition.y()),
+                                   static_cast<qreal>(drawRect.top()),
+                                   static_cast<qreal>(drawRect.bottom()));
+
+        painter.setPen(QPen(QColor(132, 148, 173), 1.0, Qt::DotLine));
+        painter.drawLine(QPointF(x, drawRect.top()), QPointF(x, drawRect.bottom()));
+        painter.drawLine(QPointF(drawRect.left(), y), QPointF(drawRect.right(), y));
+
+        if (m_hoverBinIndex >= 0 && m_hoverBinIndex < m_spectrum.size() && m_spectrum.size() > 1)
+        {
+            const qreal markerX = drawRect.left() +
+                                  (drawRect.width() * static_cast<qreal>(m_hoverBinIndex)) / (m_spectrum.size() - 1);
+            const float ratio = (m_hoverLevelDb - m_minDb) / (m_maxDb - m_minDb);
+            const float clamped = std::clamp(ratio, 0.0f, 1.0f);
+            const qreal markerY = drawRect.bottom() - (drawRect.height() * clamped);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(255, 214, 160));
+            painter.drawEllipse(QPointF(markerX, markerY), 3.5, 3.5);
+        }
+
+        const QString infoText =
+            formatFrequency(m_hoverFrequencyHz) + "  " + QString::number(m_hoverLevelDb, 'f', 1) + " dB";
+        const QRect infoRect = QRect(drawRect.right() - 220, drawRect.top() + 8, 212, metrics.height() + 10);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(12, 18, 30, 220));
+        painter.drawRoundedRect(infoRect, 6.0, 6.0);
+        painter.setPen(QColor(240, 244, 250));
+        painter.drawText(infoRect.adjusted(10, 0, -10, 0), Qt::AlignVCenter | Qt::AlignLeft, infoText);
+    }
+
     painter.setPen(QColor(220, 230, 245));
     painter.drawText(drawRect.adjusted(6, 4, -6, -4), Qt::AlignTop | Qt::AlignLeft, "Spectrum (dBm)");
     painter.drawText(10, drawRect.top() - 2, 50, metrics.height(), Qt::AlignRight | Qt::AlignVCenter, "Power");
     painter.drawText(drawRect.left(), drawRect.bottom() + 24, drawRect.width(), metrics.height(), Qt::AlignHCenter | Qt::AlignTop, "Frequency");
+}
+
+QRect SpectrumWidget::spectrumDrawRect() const
+{
+    return rect().adjusted(70, 18, -18, -42);
+}
+
+bool SpectrumWidget::tryMapFromPosition(const QPoint &position,
+                                        double *frequencyHz,
+                                        float *levelDb,
+                                        int *binIndex) const
+{
+    const QRect drawRect = spectrumDrawRect();
+    if (!drawRect.contains(position) || m_sampleRateHz <= 0.0 || m_spectrum.isEmpty())
+    {
+        return false;
+    }
+
+    const double normalizedX =
+        static_cast<double>(position.x() - drawRect.left()) / std::max(1, drawRect.width());
+    const double spanStart = m_centerFreqHz - (m_sampleRateHz * 0.5);
+    const double mappedFrequencyHz = spanStart + (m_sampleRateHz * std::clamp(normalizedX, 0.0, 1.0));
+
+    if (frequencyHz != nullptr)
+    {
+        *frequencyHz = mappedFrequencyHz;
+    }
+
+    const int maxBinIndex = m_spectrum.size() - 1;
+    const int mappedBinIndex = std::clamp(
+        static_cast<int>(std::lround(std::clamp(normalizedX, 0.0, 1.0) * (m_spectrum.size() - 1))),
+        0,
+        maxBinIndex);
+
+    if (levelDb != nullptr)
+    {
+        *levelDb = m_spectrum[mappedBinIndex];
+    }
+
+    if (binIndex != nullptr)
+    {
+        *binIndex = mappedBinIndex;
+    }
+
+    return true;
 }
 
 QString SpectrumWidget::formatFrequency(double hz) const

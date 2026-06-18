@@ -31,6 +31,11 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_worker.get(), &SdrWorker::spectrumReady, this, &MainWindow::handleSpectrum);
     connect(m_worker.get(), &SdrWorker::statusChanged, this, &MainWindow::handleStatus);
     connect(m_worker.get(), &SdrWorker::errorOccurred, this, &MainWindow::handleError);
+    connect(m_spectrumWidget, &SpectrumWidget::demodFrequencySelected, this,
+            [this](double frequencyHz)
+            {
+                m_demodFreqSpin->setValue(frequencyHz);
+            });
 
     updateSpectrumAxes();
 }
@@ -205,7 +210,7 @@ void MainWindow::buildUi()
     m_gainSpin->setRange(0.0, 76.0);
     m_gainSpin->setDecimals(1);
     m_gainSpin->setSingleStep(1.0);
-    m_gainSpin->setValue(40.0);
+    m_gainSpin->setValue(30.0);
     m_gainSpin->setSuffix(" dB");
     connect(m_gainSpin, &QDoubleSpinBox::valueChanged, this,
             [this](double value)
