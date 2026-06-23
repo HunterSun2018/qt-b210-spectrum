@@ -18,12 +18,24 @@
 #include <uhd/usrp/multi_usrp.hpp>
 
 class FftProcessor;
+class UdpIqClient;
 
 class SdrWorker : public QThread
 {
     Q_OBJECT
 
 public:
+    struct UdpSettings {
+        bool enabled = false;
+        QString remoteAddress = "127.0.0.1";
+        std::uint16_t remotePort = 10112;
+        QString bindAddress = "0.0.0.0";
+        std::uint16_t bindPort = 0;
+        std::uint16_t majorVersion = 0;
+        std::uint16_t minorVersion = 0;
+        std::uint16_t bodyType = 0;
+    };
+
     enum class InputSource {
         Usrp,
         Simulator
@@ -59,6 +71,7 @@ public:
         QString antenna = "TX/RX";
         double squelchDb = -55.0;
         std::size_t fftSize = 2048;
+        UdpSettings udp;
     };
 
     explicit SdrWorker(QObject *parent = nullptr);
@@ -83,6 +96,7 @@ public:
 
 signals:
     void spectrumReady(QVector<float> spectrum);
+    void signalCenterFrequencyUpdated(double centerFrequencyHz);
     void statusChanged(const QString &status);
     void errorOccurred(const QString &errorText);
 
@@ -111,8 +125,10 @@ private:
     void runUsrpStream();
     void processingLoop(std::stop_token stopToken);
     void audioLoop(std::stop_token stopToken);
+    void udpLoop(std::stop_token stopToken);
     void enqueueProcessingFrame(ProcessingFrame &&frame);
     void enqueueAudioFrame(AudioFrame &&frame);
+    void enqueueUdpFrame(const ProcessingFrame &frame);
     void storeProcessingError(std::exception_ptr error);
     void rethrowProcessingError();
     void requestWorkerStop();
@@ -131,11 +147,18 @@ private:
     std::condition_variable_any m_audioQueueCv;
     std::deque<AudioFrame> m_audioQueue;
 
+    std::mutex m_udpQueueMutex;
+    std::condition_variable_any m_udpQueueCv;
+    std::deque<ProcessingFrame> m_udpQueue;
+
     std::mutex m_processingErrorMutex;
     std::exception_ptr m_processingError;
     std::atomic_bool m_producerDone{false};
     std::atomic_bool m_audioProducerDone{false};
+    std::atomic_bool m_udpProducerDone{false};
 
     std::jthread m_processingThread;
     std::jthread m_audioThread;
+    std::jthread m_udpThread;
+    std::unique_ptr<UdpIqClient> m_udpClient;
 };

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <limits>
 #include <memory>
 
 #include <QMainWindow>
@@ -22,16 +23,21 @@ public:
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow() override;
 
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override;
+
 private slots:
     void startStreaming();
     void stopStreaming();
     void handleSpectrum(const QVector<float> &spectrum);
+    void handleSignalCenterFrequency(double centerFrequencyHz);
     void handleStatus(const QString &status);
     void handleError(const QString &errorText);
     void updateSpectrumAxes();
 
 private:
     void buildUi();
+    void refreshTrackedSpectrum();
 
     QComboBox *m_sourceCombo = nullptr;
     QComboBox *m_rxDboardCombo = nullptr;
@@ -50,7 +56,10 @@ private:
     QPushButton *m_stopButton = nullptr;
     QLabel *m_statusLabel = nullptr;
     SpectrumWidget *m_spectrumWidget = nullptr;
+    SpectrumWidget *m_trackedSpectrumWidget = nullptr;
     WaterfallWidget *m_waterfallWidget = nullptr;
+    QVector<float> m_lastSpectrum;
+    double m_trackedCenterFreqHz = std::numeric_limits<double>::quiet_NaN();
 
     std::unique_ptr<SdrWorker> m_worker;    
 };

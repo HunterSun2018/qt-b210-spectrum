@@ -12,6 +12,7 @@ public:
     explicit SpectrumWidget(QWidget *parent = nullptr);
     void setFrequencySpan(double centerFreqHz, double sampleRateHz);
     void setDemodMarker(double demodFreqHz, bool enabled);
+    void setTitle(const QString &title);
 
 signals:
     void demodFrequencySelected(double frequencyHz);
@@ -37,6 +38,7 @@ private:
     double m_sampleRateHz = 2.0e6;
     double m_demodFreqHz = 2.45e9;
     bool m_demodMarkerEnabled = false;
+    QString m_title = "Spectrum (dBm)";
     bool m_hoverActive = false;
     QPoint m_hoverPosition;
     double m_hoverFrequencyHz = 0.0;

@@ -29,6 +29,12 @@ void SpectrumWidget::setDemodMarker(double demodFreqHz, bool enabled)
     update();
 }
 
+void SpectrumWidget::setTitle(const QString &title)
+{
+    m_title = title;
+    update();
+}
+
 void SpectrumWidget::setSpectrum(const QVector<float> &spectrum)
 {
     m_spectrum = spectrum;
@@ -187,7 +193,7 @@ void SpectrumWidget::paintEvent(QPaintEvent *event)
     }
 
     painter.setPen(QColor(220, 230, 245));
-    painter.drawText(drawRect.adjusted(6, 4, -6, -4), Qt::AlignTop | Qt::AlignLeft, "Spectrum (dBm)");
+    painter.drawText(drawRect.adjusted(6, 4, -6, -4), Qt::AlignTop | Qt::AlignLeft, m_title);
     painter.drawText(10, drawRect.top() - 2, 50, metrics.height(), Qt::AlignRight | Qt::AlignVCenter, "Power");
     painter.drawText(drawRect.left(), drawRect.bottom() + 24, drawRect.width(), metrics.height(), Qt::AlignHCenter | Qt::AlignTop, "Frequency");
 }

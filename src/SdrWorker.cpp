@@ -9,6 +9,7 @@
 #include <deque>
 #include <exception>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <random>
@@ -26,6 +27,7 @@
 
 #include "FftProcessor.h"
 #include "IqFftwProcessor.h"
+#include "UdpIqClient.h"
 
 namespace
 {
@@ -44,6 +46,7 @@ namespace
     constexpr float kSignalPowerFloor = 1.0e-12f;
     constexpr std::size_t kMaxProcessingQueueDepth = 3;
     constexpr std::size_t kMaxAudioQueueDepth = 8;
+    constexpr std::size_t kMaxUdpQueueDepth = 8;
     constexpr std::size_t kMaxSpectrumChunksPerFrame = 8;
     constexpr double kTargetBufferDurationSeconds = 0.01;
     constexpr double kFmChannelSampleRate = 240000.0;
@@ -536,6 +539,30 @@ namespace
         return quantized;
     }
 
+    QString describeUdpPacket(const UdpIqClient::ResponsePacket &packet)
+    {
+        if (packet.result.bodyType == 202)
+        {
+            return QString("UDP RX body=%1 iq_pairs=%2 sr=%3 bw=%4")
+                .arg(packet.result.bodyType)
+                .arg(packet.jamIq.iqSamples.size())
+                .arg(packet.jamIq.sampleRate)
+                .arg(packet.jamIq.bandwidth);
+        }
+
+        if (packet.result.bodyType == 201 || packet.result.bodyType == 203 || packet.result.bodyType == 204)
+        {
+            return QString("UDP RX body=%1 signal_type=%2 freq=%3")
+                .arg(packet.result.bodyType)
+                .arg(packet.result.signalType)
+                .arg(packet.result.signalFreq);
+        }
+
+        return QString("UDP RX body=%1 len=%2")
+            .arg(packet.result.bodyType)
+            .arg(packet.result.bodyLength);
+    }
+
     QVector<float> processWithIqFftw(IqFftwProcessor &processor,
                                      const std::int16_t *iqInterleaved,
                                      std::size_t iqValueCount,
@@ -671,18 +698,28 @@ void SdrWorker::initializeRunState()
         m_audioQueue.clear();
     }
     {
+        std::lock_guard<std::mutex> lock(m_udpQueueMutex);
+        m_udpQueue.clear();
+    }
+    {
         std::lock_guard<std::mutex> lock(m_processingErrorMutex);
         m_processingError = nullptr;
     }
 
     m_producerDone = false;
     m_audioProducerDone = false;
+    m_udpProducerDone = false;
+    m_udpClient = std::make_unique<UdpIqClient>();
 }
 
 void SdrWorker::startWorkerThreads()
 {
     m_audioThread = std::jthread(&SdrWorker::audioLoop, this);
     m_processingThread = std::jthread(&SdrWorker::processingLoop, this);
+    if (m_settings.udp.enabled)
+    {
+        m_udpThread = std::jthread(&SdrWorker::udpLoop, this);
+    }
 }
 
 void SdrWorker::stopWorkerThreads(bool emitStoppedStatus, bool rethrowError)
@@ -690,8 +727,10 @@ void SdrWorker::stopWorkerThreads(bool emitStoppedStatus, bool rethrowError)
     requestWorkerStop();
     m_producerDone = true;
     m_audioProducerDone = true;
+    m_udpProducerDone = true;
     m_processingQueueCv.notify_all();
     m_audioQueueCv.notify_all();
+    m_udpQueueCv.notify_all();
 
     if (m_processingThread.joinable())
     {
@@ -700,6 +739,15 @@ void SdrWorker::stopWorkerThreads(bool emitStoppedStatus, bool rethrowError)
     if (m_audioThread.joinable())
     {
         m_audioThread.join();
+    }
+    if (m_udpThread.joinable())
+    {
+        m_udpThread.join();
+    }
+
+    if (m_udpClient)
+    {
+        m_udpClient->close();
     }
 
     if (rethrowError)
@@ -722,8 +770,13 @@ void SdrWorker::requestWorkerStop()
     {
         m_audioThread.request_stop();
     }
+    if (m_udpThread.joinable())
+    {
+        m_udpThread.request_stop();
+    }
     m_processingQueueCv.notify_all();
     m_audioQueueCv.notify_all();
+    m_udpQueueCv.notify_all();
 }
 
 void SdrWorker::runSimulatorStream()
@@ -743,6 +796,7 @@ void SdrWorker::runSimulatorStream()
         frame.received = m_samplesPerBuffer;
         frame.floatSamples = makeSimulatorBaseband(
             m_samplesPerBuffer, m_settings.sampleRate, frameIndex++, m_settings.demodMode);
+        enqueueUdpFrame(frame);
         enqueueProcessingFrame(std::move(frame));
 
         const auto frameTime =
@@ -852,12 +906,101 @@ void SdrWorker::runUsrpStream()
             frame.floatSamples.resize(bufferedSamples);
             std::copy_n(recvBufferFloat.begin(), static_cast<std::ptrdiff_t>(bufferedSamples), frame.floatSamples.begin());
         }
+        enqueueUdpFrame(frame);
         enqueueProcessingFrame(std::move(frame));
         bufferedSamples = 0;
     }
 
     uhd::stream_cmd_t stopCmd(uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS);
     rxStreamer->issue_stream_cmd(stopCmd);
+}
+
+void SdrWorker::udpLoop(std::stop_token stopToken)
+{
+    try
+    {
+        if (!m_udpClient)
+        {
+            throw std::runtime_error("UDP client is not initialized");
+        }
+
+        m_udpClient->open(
+            UdpIqClient::Endpoint{m_settings.udp.remoteAddress.toStdString(), m_settings.udp.remotePort},
+            UdpIqClient::BindEndpoint{m_settings.udp.bindAddress.toStdString(), m_settings.udp.bindPort});
+
+        while (!stopToken.stop_requested())
+        {
+            ProcessingFrame frame;
+            bool hasFrame = false;
+            {
+                std::unique_lock<std::mutex> lock(m_udpQueueMutex);
+                m_udpQueueCv.wait_for(lock,
+                                      stopToken,
+                                      std::chrono::milliseconds(20),
+                                      [&]
+                                      { return m_udpProducerDone || !m_udpQueue.empty() || m_stopRequested; });
+
+                if (!m_udpQueue.empty())
+                {
+                    frame = std::move(m_udpQueue.front());
+                    m_udpQueue.pop_front();
+                    hasFrame = true;
+                }
+                else if (m_udpProducerDone || m_stopRequested || stopToken.stop_requested())
+                {
+                    break;
+                }
+            }
+
+            if (hasFrame && frame.usesInt16 && !frame.int16Samples.empty())
+            {
+                const auto sampleRate = static_cast<std::uint32_t>(
+                    std::clamp(std::llround(m_settings.sampleRate),
+                               0LL,
+                               static_cast<long long>(std::numeric_limits<std::uint32_t>::max())));
+                const auto bandwidth = sampleRate;
+                const auto frequencyHz = static_cast<std::uint64_t>(
+                    std::clamp(std::llround(m_settings.centerFreq),
+                               0LL,
+                               static_cast<long long>(std::numeric_limits<std::uint32_t>::max())));
+
+                m_udpClient->sendInterleaved(
+                    UdpIqClient::SendMeta{
+                        m_settings.udp.majorVersion,
+                        m_settings.udp.minorVersion,
+                        m_settings.udp.bodyType,
+                        sampleRate,
+                        frequencyHz,
+                        bandwidth},
+                    frame.int16Samples.data(),
+                    static_cast<std::uint32_t>(std::min(frame.received, frame.int16Samples.size())));
+            }
+
+            while (!stopToken.stop_requested())
+            {
+                const auto packet = m_udpClient->receivePacket(std::chrono::milliseconds(hasFrame ? 5 : 1));
+                if (!packet.has_value())
+                {
+                    break;
+                }
+
+                if (packet->result.bodyType == 202 && !packet->jamIq.iqSamples.empty())
+                {
+                    ProcessingFrame responseFrame;
+                    responseFrame.received = packet->jamIq.iqSamples.size();
+                    responseFrame.usesInt16 = true;
+                    responseFrame.int16Samples = packet->jamIq.iqSamples;
+                    enqueueProcessingFrame(std::move(responseFrame));
+                }
+
+                std::cout << describeUdpPacket(*packet).toStdString() << std::endl;
+            }
+        }
+    }
+    catch (...)
+    {
+        storeProcessingError(std::current_exception());
+    }
 }
 
 void SdrWorker::processingLoop(std::stop_token stopToken)
@@ -1022,18 +1165,12 @@ void SdrWorker::processingLoop(std::stop_token stopToken)
 
                             if (recent_estimates.size() == 100)
                             {
-                                // auto average = accumulate(recent_estimates.begin(), recent_estimates.end(), 0.0) / 100.0;
-                                // std::time_t time = std::time({});
-                                // char timeString[64] = {0};
-                                // std::strftime(std::data(timeString), std::size(timeString),
-                                //               "%x %EX", std::localtime(&time));
- 
                                 auto m = recent_estimates.begin() + recent_estimates.size() / 2;
                                 std::nth_element(recent_estimates.begin(), m ,recent_estimates.end());
-                                average = recent_estimates[recent_estimates.size() / 2];
+                                const double average = recent_estimates[recent_estimates.size() / 2];
+                                emit signalCenterFrequencyUpdated(average);
 
-                                std::cout << timeString << ", "
-                                          << "Signal center frequency: " << average << " Hz, "
+                                std::cout << "Signal center frequency: " << average << " Hz, "
                                           //   << signal_estimate->power_dbfs << " dBFS"
                                           << std::endl;
                             }
@@ -1186,6 +1323,35 @@ void SdrWorker::enqueueAudioFrame(AudioFrame &&frame)
     m_audioQueueCv.notify_one();
 }
 
+void SdrWorker::enqueueUdpFrame(const ProcessingFrame &frame)
+{
+    if (m_stopRequested || !m_settings.udp.enabled || frame.received == 0)
+    {
+        return;
+    }
+
+    ProcessingFrame udpFrame;
+    udpFrame.received = frame.received;
+    udpFrame.usesInt16 = true;
+    if (frame.usesInt16)
+    {
+        udpFrame.int16Samples = frame.int16Samples;
+    }
+    else
+    {
+        udpFrame.int16Samples = quantizeToSc16(frame.floatSamples);
+    }
+    udpFrame.received = std::min(udpFrame.received, udpFrame.int16Samples.size());
+
+    std::lock_guard<std::mutex> lock(m_udpQueueMutex);
+    if (m_udpQueue.size() >= kMaxUdpQueueDepth)
+    {
+        m_udpQueue.pop_front();
+    }
+    m_udpQueue.push_back(std::move(udpFrame));
+    m_udpQueueCv.notify_one();
+}
+
 void SdrWorker::storeProcessingError(std::exception_ptr error)
 {
     {
@@ -1200,6 +1366,7 @@ void SdrWorker::storeProcessingError(std::exception_ptr error)
     requestWorkerStop();
     m_processingQueueCv.notify_all();
     m_audioQueueCv.notify_all();
+    m_udpQueueCv.notify_all();
 }
 
 void SdrWorker::rethrowProcessingError()

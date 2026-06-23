@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 
 #include <cmath>
+#include <algorithm>
 
 #include <QDoubleSpinBox>
 #include <QComboBox>
@@ -12,11 +13,34 @@
 #include <QPushButton>
 #include <QSpinBox>
 #include <QVBoxLayout>
+#include <QWheelEvent>
 #include <QWidget>
 
 #include "SdrWorker.h"
 #include "SpectrumWidget.h"
 #include "WaterfallWidget.h"
+
+namespace
+{
+QVector<float> shiftSpectrumToCenter(const QVector<float> &spectrum, int offsetBins, float fillValue)
+{
+    if (spectrum.isEmpty())
+    {
+        return spectrum;
+    }
+
+    QVector<float> shifted(spectrum.size(), fillValue);
+    for (int index = 0; index < spectrum.size(); ++index)
+    {
+        const int sourceIndex = index + offsetBins;
+        if (sourceIndex >= 0 && sourceIndex < spectrum.size())
+        {
+            shifted[index] = spectrum[sourceIndex];
+        }
+    }
+    return shifted;
+}
+}
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent),
@@ -31,6 +55,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_demodFreqSpin, &QDoubleSpinBox::valueChanged, this, &MainWindow::updateSpectrumAxes);
 
     connect(m_worker.get(), &SdrWorker::spectrumReady, this, &MainWindow::handleSpectrum);
+    connect(m_worker.get(), &SdrWorker::signalCenterFrequencyUpdated, this, &MainWindow::handleSignalCenterFrequency);
     connect(m_worker.get(), &SdrWorker::statusChanged, this, &MainWindow::handleStatus);
     connect(m_worker.get(), &SdrWorker::errorOccurred, this, &MainWindow::handleError);
     connect(m_spectrumWidget, &SpectrumWidget::demodFrequencySelected, this,
@@ -52,6 +77,27 @@ MainWindow::~MainWindow()
     m_worker->wait();
 }
 
+bool MainWindow::eventFilter(QObject *watched, QEvent *event)
+{
+    if (watched == m_freqSpin && event->type() == QEvent::Wheel)
+    {
+        auto *wheelEvent = static_cast<QWheelEvent *>(event);
+        const QPoint angleDelta = wheelEvent->angleDelta();
+        if (!angleDelta.isNull())
+        {
+            const double steps = static_cast<double>(angleDelta.y()) / 120.0;
+            if (steps != 0.0)
+            {
+                m_freqSpin->setValue(m_freqSpin->value() + (steps * m_freqSpin->singleStep()));
+                wheelEvent->accept();
+                return true;
+            }
+        }
+    }
+
+    return QMainWindow::eventFilter(watched, event);
+}
+
 void MainWindow::startStreaming()
 {
     SdrWorker::Settings settings;
@@ -71,6 +117,14 @@ void MainWindow::startStreaming()
     settings.gain = m_gainSpin->value();
     settings.squelchDb = m_squelchSpin->value();
     settings.fftSize = static_cast<std::size_t>(m_fftSpin->currentData().toInt());
+    
+    settings.udp.enabled = true;
+    settings.udp.remoteAddress = "192.168.1.50";
+    settings.udp.remotePort = 10112;
+    settings.udp.bindAddress = "0.0.0.0";
+    settings.udp.bindPort = 0;
+    settings.udp.majorVersion = 0;
+    settings.udp.minorVersion = 0;    
 
     m_startButton->setEnabled(false);
     m_stopButton->setEnabled(true);
@@ -86,8 +140,16 @@ void MainWindow::stopStreaming()
 
 void MainWindow::handleSpectrum(const QVector<float> &spectrum)
 {
+    m_lastSpectrum = spectrum;
     m_spectrumWidget->setSpectrum(spectrum);
+    refreshTrackedSpectrum();
     m_waterfallWidget->addSpectrumLine(spectrum);
+}
+
+void MainWindow::handleSignalCenterFrequency(double centerFrequencyHz)
+{
+    m_trackedCenterFreqHz = centerFrequencyHz;
+    refreshTrackedSpectrum();
 }
 
 void MainWindow::handleStatus(const QString &status)
@@ -111,6 +173,31 @@ void MainWindow::updateSpectrumAxes()
     m_spectrumWidget->setDemodMarker(
         m_demodFreqSpin->value(),
         static_cast<SdrWorker::DemodMode>(m_demodCombo->currentData().toInt()) != SdrWorker::DemodMode::None);
+    refreshTrackedSpectrum();
+}
+
+void MainWindow::refreshTrackedSpectrum()
+{
+    const double sampleRateHz = m_rateSpin->value();
+    const double inputCenterFreqHz = m_freqSpin->value();
+    const bool demodEnabled =
+        static_cast<SdrWorker::DemodMode>(m_demodCombo->currentData().toInt()) != SdrWorker::DemodMode::None;
+
+    const double trackedCenterFreqHz =
+        std::isfinite(m_trackedCenterFreqHz) ? m_trackedCenterFreqHz : inputCenterFreqHz;
+    m_trackedSpectrumWidget->setFrequencySpan(trackedCenterFreqHz, sampleRateHz);
+    m_trackedSpectrumWidget->setDemodMarker(m_demodFreqSpin->value(), demodEnabled);
+
+    if (m_lastSpectrum.isEmpty() || sampleRateHz <= 0.0)
+    {
+        m_trackedSpectrumWidget->setSpectrum(m_lastSpectrum);
+        return;
+    }
+
+    const auto binCount = std::max<qsizetype>(1, m_lastSpectrum.size() - 1);
+    const double binWidthHz = sampleRateHz / static_cast<double>(binCount);
+    const int offsetBins = static_cast<int>(std::lround((trackedCenterFreqHz - inputCenterFreqHz) / binWidthHz));
+    m_trackedSpectrumWidget->setSpectrum(shiftSpectrumToCenter(m_lastSpectrum, offsetBins, -120.0f));
 }
 
 void MainWindow::buildUi()
@@ -191,9 +278,10 @@ void MainWindow::buildUi()
     m_freqSpin = new QDoubleSpinBox(controlBox);
     m_freqSpin->setRange(50.0, 6.0e9);
     m_freqSpin->setDecimals(0);
-    m_freqSpin->setSingleStep(1.0e6);
+    m_freqSpin->setSingleStep(1.0e4);
     m_freqSpin->setValue(103.9e6);
     m_freqSpin->setSuffix(" Hz");
+    m_freqSpin->installEventFilter(this);
     connect(m_freqSpin, &QDoubleSpinBox::valueChanged, this,
             [this](double value)
             {
@@ -289,10 +377,14 @@ void MainWindow::buildUi()
     controlLayout->addWidget(m_stopButton, 4, 6);
 
     m_spectrumWidget = new SpectrumWidget(central);
+    m_spectrumWidget->setTitle("Input Spectrum (dBm)");
+    m_trackedSpectrumWidget = new SpectrumWidget(central);
+    m_trackedSpectrumWidget->setTitle("Signal-Centered Spectrum (dBm)");
     m_waterfallWidget = new WaterfallWidget(central);
 
     layout->addWidget(controlBox);
     layout->addWidget(m_spectrumWidget, 1);
+    layout->addWidget(m_trackedSpectrumWidget, 1);
     layout->addWidget(m_waterfallWidget, 1);
 
     setCentralWidget(central);
