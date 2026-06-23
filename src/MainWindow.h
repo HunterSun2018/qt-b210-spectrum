@@ -3,6 +3,7 @@
 #include <memory>
 
 #include <QMainWindow>
+#include <QVector>
 
 class QDoubleSpinBox;
 class QComboBox;
@@ -10,6 +11,7 @@ class QLineEdit;
 class QPushButton;
 class QLabel;
 class QSpinBox;
+class QPlainTextEdit;
 class SpectrumWidget;
 class SdrWorker;
 class WaterfallWidget;
@@ -28,6 +30,7 @@ private slots:
     void handleSpectrum(const QVector<float> &spectrum);
     void handleStatus(const QString &status);
     void handleError(const QString &errorText);
+    void handleDecodedText(const QString &text);
     void updateSpectrumAxes();
 
 private:
@@ -49,6 +52,7 @@ private:
     QPushButton *m_startButton = nullptr;
     QPushButton *m_stopButton = nullptr;
     QLabel *m_statusLabel = nullptr;
+    QPlainTextEdit *m_decodedTextEdit = nullptr;
     SpectrumWidget *m_spectrumWidget = nullptr;
     WaterfallWidget *m_waterfallWidget = nullptr;
 

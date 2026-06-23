@@ -14,6 +14,8 @@
 #include <vector>
 
 #include <QThread>
+#include <QString>
+#include <QVector>
 
 #include <uhd/usrp/multi_usrp.hpp>
 
@@ -42,7 +44,8 @@ public:
     enum class DemodMode {
         None,
         FM,
-        AM
+        AM,
+        QPSK
     };
 
     struct Settings {
@@ -85,6 +88,7 @@ signals:
     void spectrumReady(QVector<float> spectrum);
     void statusChanged(const QString &status);
     void errorOccurred(const QString &errorText);
+    void decodedTextReady(const QString &text);
 
 protected:
     void run() override;

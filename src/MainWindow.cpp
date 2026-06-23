@@ -9,8 +9,10 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QTextCursor>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -33,6 +35,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_worker.get(), &SdrWorker::spectrumReady, this, &MainWindow::handleSpectrum);
     connect(m_worker.get(), &SdrWorker::statusChanged, this, &MainWindow::handleStatus);
     connect(m_worker.get(), &SdrWorker::errorOccurred, this, &MainWindow::handleError);
+    connect(m_worker.get(), &SdrWorker::decodedTextReady, this, &MainWindow::handleDecodedText);
     connect(m_spectrumWidget, &SpectrumWidget::demodFrequencySelected, this,
             [this](double frequencyHz)
             {
@@ -72,6 +75,7 @@ void MainWindow::startStreaming()
     settings.squelchDb = m_squelchSpin->value();
     settings.fftSize = static_cast<std::size_t>(m_fftSpin->currentData().toInt());
 
+    m_decodedTextEdit->clear();
     m_startButton->setEnabled(false);
     m_stopButton->setEnabled(true);
     m_worker->startStreaming(settings);
@@ -103,6 +107,18 @@ void MainWindow::handleStatus(const QString &status)
 void MainWindow::handleError(const QString &errorText)
 {
     QMessageBox::critical(this, "B210 Streaming Error", errorText);
+}
+
+void MainWindow::handleDecodedText(const QString &text)
+{
+    if (text.isEmpty())
+    {
+        return;
+    }
+
+    m_decodedTextEdit->moveCursor(QTextCursor::End);
+    m_decodedTextEdit->insertPlainText(text);
+    m_decodedTextEdit->moveCursor(QTextCursor::End);
 }
 
 void MainWindow::updateSpectrumAxes()
@@ -164,11 +180,18 @@ void MainWindow::buildUi()
     m_demodCombo->addItem("Off", static_cast<int>(SdrWorker::DemodMode::None));
     m_demodCombo->addItem("FM", static_cast<int>(SdrWorker::DemodMode::FM));
     m_demodCombo->addItem("AM", static_cast<int>(SdrWorker::DemodMode::AM));
+    m_demodCombo->addItem("QPSK", static_cast<int>(SdrWorker::DemodMode::QPSK));
     connect(m_demodCombo, &QComboBox::currentIndexChanged, this,
             [this](int index)
             {
                 Q_UNUSED(index);
                 const auto mode = static_cast<SdrWorker::DemodMode>(m_demodCombo->currentData().toInt());
+                if (mode == SdrWorker::DemodMode::QPSK)
+                {
+                    m_rateSpin->setValue(320000.0);
+                    m_freqSpin->setValue(172.7e6);
+                    m_demodFreqSpin->setValue(172.7e6);
+                }
                 m_worker->setDemodMode(mode);
                 updateSpectrumAxes();
             });
@@ -249,6 +272,10 @@ void MainWindow::buildUi()
     m_stopButton->setEnabled(false);
 
     m_statusLabel = new QLabel("Status: Idle", controlBox);
+    m_decodedTextEdit = new QPlainTextEdit(central);
+    m_decodedTextEdit->setReadOnly(true);
+    m_decodedTextEdit->setPlaceholderText("Decoded QPSK text will appear here...");
+    m_decodedTextEdit->setMaximumBlockCount(200);
 
     controlLayout->addWidget(new QLabel("Source :", controlBox), 0, 0);
     controlLayout->addWidget(m_sourceCombo, 0, 1);
@@ -294,6 +321,7 @@ void MainWindow::buildUi()
     layout->addWidget(controlBox);
     layout->addWidget(m_spectrumWidget, 1);
     layout->addWidget(m_waterfallWidget, 1);
+    layout->addWidget(m_decodedTextEdit);
 
     setCentralWidget(central);
 }

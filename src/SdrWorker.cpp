@@ -45,11 +45,19 @@ namespace
     constexpr std::size_t kMaxProcessingQueueDepth = 3;
     constexpr std::size_t kMaxAudioQueueDepth = 8;
     constexpr std::size_t kMaxSpectrumChunksPerFrame = 8;
+    constexpr std::size_t kMaxDecodedTextBytes = 256;
     constexpr double kTargetBufferDurationSeconds = 0.01;
     constexpr double kFmChannelSampleRate = 240000.0;
     constexpr double kAmChannelSampleRate = 96000.0;
+    constexpr double kQpskChannelSampleRate = 320000.0;
     constexpr double kFmChannelCutoffHz = 100000.0;
     constexpr double kAmChannelCutoffHz = 9000.0;
+    constexpr double kQpskChannelCutoffHz = 120000.0;
+    constexpr double kQpskSymbolRate = 80000.0;
+    constexpr float kQpskLoopGain = 0.035f;
+    constexpr float kQpskAgcRate = 0.0025f;
+    constexpr float kQpskMatchedFilterAlpha = 0.18f;
+    constexpr std::size_t kQpskPreamble = 0x1ACFFC1D;
 
     struct AudioPlaybackContext
     {
@@ -101,6 +109,24 @@ namespace
         std::complex<float> decimationAccumulator{0.0f, 0.0f};
         std::complex<float> filteredSample{0.0f, 0.0f};
         SdrWorker::DemodMode mode = SdrWorker::DemodMode::None;
+    };
+
+    struct QpskDecoderState
+    {
+        float agcGain = 1.0f;
+        float costasPhase = 0.0f;
+        float costasFrequency = 0.0f;
+        float matchedISample = 0.0f;
+        float matchedQSample = 0.0f;
+        double symbolClock = 0.0;
+        double samplesPerSymbol = 4.0;
+        std::complex<float> lastSymbol{1.0f, 0.0f};
+        bool hasLastSymbol = false;
+        std::uint8_t bitAccumulator = 0;
+        int bitsInAccumulator = 0;
+        std::uint32_t shiftRegister = 0;
+        std::string frameBuffer;
+        bool inFrame = false;
     };
 
     std::vector<std::complex<float>> generateSimulatedIq(std::size_t sampleCount, double sampleRate, std::size_t frameIndex);
@@ -226,12 +252,34 @@ namespace
 
     double targetDemodSampleRate(SdrWorker::DemodMode mode)
     {
-        return mode == SdrWorker::DemodMode::FM ? kFmChannelSampleRate : kAmChannelSampleRate;
+        switch (mode)
+        {
+        case SdrWorker::DemodMode::FM:
+            return kFmChannelSampleRate;
+        case SdrWorker::DemodMode::AM:
+            return kAmChannelSampleRate;
+        case SdrWorker::DemodMode::QPSK:
+            return kQpskChannelSampleRate;
+        case SdrWorker::DemodMode::None:
+        default:
+            return kAmChannelSampleRate;
+        }
     }
 
     double targetDemodCutoffHz(SdrWorker::DemodMode mode)
     {
-        return mode == SdrWorker::DemodMode::FM ? kFmChannelCutoffHz : kAmChannelCutoffHz;
+        switch (mode)
+        {
+        case SdrWorker::DemodMode::FM:
+            return kFmChannelCutoffHz;
+        case SdrWorker::DemodMode::AM:
+            return kAmChannelCutoffHz;
+        case SdrWorker::DemodMode::QPSK:
+            return kQpskChannelCutoffHz;
+        case SdrWorker::DemodMode::None:
+        default:
+            return kAmChannelCutoffHz;
+        }
     }
 
     void resetChannelizer(ChannelizerState *state,
@@ -392,7 +440,209 @@ namespace
             return samples;
         }
 
+        if (demodMode == SdrWorker::DemodMode::QPSK)
+        {
+            std::vector<std::complex<float>> samples(sampleCount, {0.0f, 0.0f});
+            const std::string message = "QPSK DEMO 172.7M 320KSPS\r\n";
+            std::vector<int> dibits;
+            dibits.reserve((32 + (message.size() * 8U)) / 2U);
+
+            for (int bit = 31; bit >= 0; bit -= 2)
+            {
+                dibits.push_back(static_cast<int>((kQpskPreamble >> (bit - 1)) & 0x3U));
+            }
+
+            for (unsigned char ch : message)
+            {
+                for (int bit = 7; bit >= 1; bit -= 2)
+                {
+                    dibits.push_back(static_cast<int>((ch >> (bit - 1)) & 0x3U));
+                }
+            }
+
+            const std::size_t samplesPerSymbol =
+                std::max<std::size_t>(1, static_cast<std::size_t>(std::llround(sampleRate / kQpskSymbolRate)));
+            const std::size_t startSymbol = (frameIndex * sampleCount) / samplesPerSymbol;
+            const float phaseStep = kTwoPi * (3200.0f / static_cast<float>(sampleRate));
+
+            for (std::size_t i = 0; i < sampleCount; ++i)
+            {
+                const std::size_t globalSample = frameIndex * sampleCount + i;
+                const std::size_t symbolIndex = (globalSample / samplesPerSymbol) % dibits.size();
+                const int dibit = dibits[symbolIndex];
+                float phase = 0.0f;
+                switch (dibit)
+                {
+                case 0:
+                    phase = kTwoPi / 8.0f;
+                    break;
+                case 1:
+                    phase = 3.0f * kTwoPi / 8.0f;
+                    break;
+                case 2:
+                    phase = -kTwoPi / 8.0f;
+                    break;
+                default:
+                    phase = -3.0f * kTwoPi / 8.0f;
+                    break;
+                }
+
+                const float carrierPhase =
+                    phaseStep * static_cast<float>(globalSample - (startSymbol * samplesPerSymbol));
+                samples[i] = 0.9f * std::polar(1.0f, phase + carrierPhase);
+            }
+            return samples;
+        }
+
         return generateSimulatedIq(sampleCount, sampleRate, frameIndex);
+    }
+
+    int quadrantDibit(const std::complex<float> &sample)
+    {
+        if (sample.real() >= 0.0f)
+        {
+            return sample.imag() >= 0.0f ? 0 : 2;
+        }
+        return sample.imag() >= 0.0f ? 1 : 3;
+    }
+
+    std::complex<float> rotateSample(const std::complex<float> &sample, float phase)
+    {
+        return sample * std::complex<float>(std::cos(phase), -std::sin(phase));
+    }
+
+    void appendQpskBits(QpskDecoderState *state, int dibit, QString *decodedText)
+    {
+        if (state == nullptr || decodedText == nullptr)
+        {
+            return;
+        }
+
+        for (int shift = 1; shift >= 0; --shift)
+        {
+            const int bit = (dibit >> shift) & 0x1;
+            state->bitAccumulator = static_cast<std::uint8_t>((state->bitAccumulator << 1) | bit);
+            ++state->bitsInAccumulator;
+
+            state->shiftRegister = (state->shiftRegister << 1) | static_cast<std::uint32_t>(bit);
+            if (state->shiftRegister == kQpskPreamble)
+            {
+                state->inFrame = true;
+                state->frameBuffer.clear();
+                state->bitsInAccumulator = 0;
+                state->bitAccumulator = 0;
+                continue;
+            }
+
+            if (state->bitsInAccumulator < 8)
+            {
+                continue;
+            }
+
+            state->bitsInAccumulator = 0;
+            const unsigned char value = state->bitAccumulator;
+            state->bitAccumulator = 0;
+
+            if (!state->inFrame)
+            {
+                continue;
+            }
+
+            if (value == '\r')
+            {
+                continue;
+            }
+
+            if (value == '\n')
+            {
+                if (!state->frameBuffer.empty())
+                {
+                    *decodedText += QString::fromStdString(state->frameBuffer + '\n');
+                    state->frameBuffer.clear();
+                }
+                state->inFrame = false;
+                continue;
+            }
+
+            if (value >= 32 && value <= 126)
+            {
+                state->frameBuffer.push_back(static_cast<char>(value));
+                if (state->frameBuffer.size() >= kMaxDecodedTextBytes)
+                {
+                    *decodedText += QString::fromStdString(state->frameBuffer + '\n');
+                    state->frameBuffer.clear();
+                    state->inFrame = false;
+                }
+            }
+            else
+            {
+                state->frameBuffer.clear();
+                state->inFrame = false;
+            }
+        }
+    }
+
+    QString decodeQpskText(const std::vector<std::complex<float>> &samples,
+                           double sampleRate,
+                           float squelchDb,
+                           QpskDecoderState *state)
+    {
+        if (samples.empty() || state == nullptr || sampleRate <= 0.0)
+        {
+            return {};
+        }
+
+        if (estimateSignalPowerDbfs(samples) < squelchDb)
+        {
+            return {};
+        }
+
+        state->samplesPerSymbol = std::max(1.0, sampleRate / kQpskSymbolRate);
+        QString decodedText;
+
+        for (const auto &rawSample : samples)
+        {
+            const float magnitude = std::max(0.05f, std::abs(rawSample));
+            state->agcGain += kQpskAgcRate * ((1.0f / magnitude) - state->agcGain);
+            const std::complex<float> agcSample = rawSample * state->agcGain;
+
+            const std::complex<float> corrected = rotateSample(agcSample, state->costasPhase);
+            state->matchedISample += kQpskMatchedFilterAlpha * (corrected.real() - state->matchedISample);
+            state->matchedQSample += kQpskMatchedFilterAlpha * (corrected.imag() - state->matchedQSample);
+            const std::complex<float> filtered(state->matchedISample, state->matchedQSample);
+
+            const float decisionI = filtered.real() >= 0.0f ? 1.0f : -1.0f;
+            const float decisionQ = filtered.imag() >= 0.0f ? 1.0f : -1.0f;
+            const float phaseError = (decisionI * filtered.imag()) - (decisionQ * filtered.real());
+            state->costasFrequency += kQpskLoopGain * phaseError * 0.05f;
+            state->costasFrequency = std::clamp(state->costasFrequency, -0.08f, 0.08f);
+            state->costasPhase += state->costasFrequency + (kQpskLoopGain * phaseError);
+            if (state->costasPhase > kTwoPi || state->costasPhase < -kTwoPi)
+            {
+                state->costasPhase = std::fmod(state->costasPhase, kTwoPi);
+            }
+
+            state->symbolClock += 1.0;
+            if (state->symbolClock < state->samplesPerSymbol)
+            {
+                continue;
+            }
+            state->symbolClock -= state->samplesPerSymbol;
+
+            const std::complex<float> normalized = filtered / std::max(0.1f, std::abs(filtered));
+            if (!state->hasLastSymbol)
+            {
+                state->lastSymbol = normalized;
+                state->hasLastSymbol = true;
+                continue;
+            }
+
+            const std::complex<float> delta = normalized * std::conj(state->lastSymbol);
+            state->lastSymbol = normalized;
+            appendQpskBits(state, quadrantDibit(delta), &decodedText);
+        }
+
+        return decodedText;
     }
 
     std::vector<std::int16_t> demodulateAudio(const std::vector<std::complex<float>> &samples,
@@ -401,7 +651,10 @@ namespace
                                               SdrWorker::DemodMode demodMode,
                                               DemodulatorState *state)
     {
-        if (demodMode == SdrWorker::DemodMode::None || state == nullptr || samples.empty())
+        if (demodMode == SdrWorker::DemodMode::None ||
+            demodMode == SdrWorker::DemodMode::QPSK ||
+            state == nullptr ||
+            samples.empty())
         {
             return {};
         }
@@ -606,6 +859,13 @@ std::tuple<std::size_t, double> SdrWorker::calculateSignalBandwidthAndFreq(std::
         centerFrequency = std::round(static_cast<double>(freq) / kAmChannelStepHz) * kAmChannelStepHz;
         break;
     }
+    case DemodMode::QPSK:
+    {
+        constexpr std::size_t kQpskBandwidthHz = 160000;
+        bandwidth = std::min<std::size_t>(kQpskBandwidthHz, sampleRate);
+        centerFrequency = static_cast<double>(freq);
+        break;
+    }
     case DemodMode::None:
     default:
         break;
@@ -733,7 +993,9 @@ void SdrWorker::runSimulatorStream()
                                       : "IqFftwProcessor";
     const QString demodName = m_settings.demodMode == DemodMode::FM
                                   ? ", FM"
-                                  : (m_settings.demodMode == DemodMode::AM ? ", AM" : "");
+                                  : (m_settings.demodMode == DemodMode::AM
+                                         ? ", AM"
+                                         : (m_settings.demodMode == DemodMode::QPSK ? ", QPSK" : ""));
     emit statusChanged("Streaming (simulator, " + processorName + demodName + ")");
 
     std::size_t frameIndex = 0;
@@ -798,7 +1060,9 @@ void SdrWorker::runUsrpStream()
 
     const QString demodName = m_settings.demodMode == DemodMode::FM
                                   ? ", FM"
-                                  : (m_settings.demodMode == DemodMode::AM ? ", AM" : "");
+                                  : (m_settings.demodMode == DemodMode::AM
+                                         ? ", AM"
+                                         : (m_settings.demodMode == DemodMode::QPSK ? ", QPSK" : ""));
     emit statusChanged(useInt16 ? "Streaming (USRP, IqFftwProcessor" + demodName + ")"
                                 : "Streaming (USRP, FftProcessor" + demodName + ")");
 
@@ -867,6 +1131,7 @@ void SdrWorker::processingLoop(std::stop_token stopToken)
         std::vector<std::complex<float>> fftInput(m_settings.fftSize);
         auto processor = std::make_unique<FftProcessor>(static_cast<int>(m_settings.fftSize));
         ChannelizerState channelizerState;
+        QpskDecoderState qpskDecoderState;
 
         IqFftwProcessor iqProcessor;
         if (iq_fftw_processor_init(&iqProcessor, m_settings.fftSize) != IQ_FFTW_OK)
@@ -1007,37 +1272,6 @@ void SdrWorker::processingLoop(std::stop_token stopToken)
                         }
                         ++processedSpectrumChunks;
 
-                        // estimate signal center frequency and print it every 100 chunks
-                        auto signal_estimate = estimate_signal(fftInput, m_settings.sampleRate, m_settings.centerFreq, fftSize);
-                        if (signal_estimate.has_value())
-                        {
-                            static std::vector<double> recent_estimates;
-
-                            if (recent_estimates.size() > 100)
-                            {
-                                recent_estimates.clear();
-                            }
-
-                            recent_estimates.push_back(signal_estimate->signal_center_Hz);
-
-                            if (recent_estimates.size() == 100)
-                            {
-                                // auto average = accumulate(recent_estimates.begin(), recent_estimates.end(), 0.0) / 100.0;
-                                // std::time_t time = std::time({});
-                                // char timeString[64] = {0};
-                                // std::strftime(std::data(timeString), std::size(timeString),
-                                //               "%x %EX", std::localtime(&time));
- 
-                                auto m = recent_estimates.begin() + recent_estimates.size() / 2;
-                                std::nth_element(recent_estimates.begin(), m ,recent_estimates.end());
-                                average = recent_estimates[recent_estimates.size() / 2];
-
-                                std::cout << timeString << ", "
-                                          << "Signal center frequency: " << average << " Hz, "
-                                          //   << signal_estimate->power_dbfs << " dBFS"
-                                          << std::endl;
-                            }
-                        }
                     }
                 }
             }
@@ -1071,28 +1305,58 @@ void SdrWorker::processingLoop(std::stop_token stopToken)
                                                             m_settings.demodMode,
                                                             &demodSampleRate,
                                                             &channelizerState);
-                    enqueueAudioFrame(
-                        AudioFrame{demodSampleRate,
-                                   static_cast<float>(m_settings.squelchDb),
-                                   m_settings.demodMode,
-                                   std::move(demodSamples)});
+                    if (m_settings.demodMode == DemodMode::QPSK)
+                    {
+                        const QString decodedText = decodeQpskText(
+                            demodSamples,
+                            demodSampleRate,
+                            static_cast<float>(m_settings.squelchDb),
+                            &qpskDecoderState);
+                        if (!decodedText.isEmpty())
+                        {
+                            emit decodedTextReady(decodedText);
+                        }
+                    }
+                    else
+                    {
+                        enqueueAudioFrame(
+                            AudioFrame{demodSampleRate,
+                                       static_cast<float>(m_settings.squelchDb),
+                                       m_settings.demodMode,
+                                       std::move(demodSamples)});
+                    }
                 }
                 else
                 {
                     double demodSampleRate = inputSampleRate;
-                    AudioFrame audioFrame;
-                    audioFrame.sampleRate = demodSampleRate;
-                    audioFrame.squelchDb = static_cast<float>(m_settings.squelchDb);
-                    audioFrame.demodMode = m_settings.demodMode;
-                    audioFrame.samples = extractDemodChannel(frame.floatSamples,
-                                                             inputSampleRate,
-                                                             inputCenterFreq,
-                                                             demodCenterFreq,
-                                                             m_settings.demodMode,
-                                                             &demodSampleRate,
-                                                             &channelizerState);
-                    audioFrame.sampleRate = demodSampleRate;
-                    enqueueAudioFrame(std::move(audioFrame));
+                    auto demodSamples = extractDemodChannel(frame.floatSamples,
+                                                            inputSampleRate,
+                                                            inputCenterFreq,
+                                                            demodCenterFreq,
+                                                            m_settings.demodMode,
+                                                            &demodSampleRate,
+                                                            &channelizerState);
+                    if (m_settings.demodMode == DemodMode::QPSK)
+                    {
+                        const QString decodedText = decodeQpskText(
+                            demodSamples,
+                            demodSampleRate,
+                            static_cast<float>(m_settings.squelchDb),
+                            &qpskDecoderState);
+                        if (!decodedText.isEmpty())
+                        {
+                            emit decodedTextReady(decodedText);
+                        }
+                    }
+                    else
+                    {
+                        AudioFrame audioFrame;
+                        audioFrame.sampleRate = demodSampleRate;
+                        audioFrame.squelchDb = static_cast<float>(m_settings.squelchDb);
+                        audioFrame.demodMode = m_settings.demodMode;
+                        audioFrame.samples = std::move(demodSamples);
+                        enqueueAudioFrame(std::move(audioFrame));
+                    }
                 }
             }
         }
@@ -1114,7 +1378,7 @@ void SdrWorker::audioLoop(std::stop_token stopToken)
         AudioPlaybackContext audioContext;
         auto audioGuard =
             std::unique_ptr<AudioPlaybackContext, decltype(&closeAudioDevice)>(&audioContext, closeAudioDevice);
-        if (m_settings.demodMode != DemodMode::None)
+        if (m_settings.demodMode != DemodMode::None && m_settings.demodMode != DemodMode::QPSK)
         {
             openAudioDevice(&audioContext, kAudioSampleRate);
         }
