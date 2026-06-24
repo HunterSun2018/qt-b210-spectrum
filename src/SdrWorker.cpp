@@ -830,7 +830,7 @@ void SdrWorker::runUsrpStream()
         std::cout << "  " << info.first << ": " << info.second << std::endl;
     }
 
-    const bool useInt16 = m_settings.processorMode == ProcessorMode::Int16Fftw;
+    const bool useInt16 = false; // m_settings.processorMode == ProcessorMode::Int16Fftw;
     uhd::stream_args_t streamArgs(useInt16 ? "sc16" : "fc32", "sc16");
     auto rxStreamer = m_usrp->get_rx_stream(streamArgs);
 
@@ -964,6 +964,8 @@ void SdrWorker::udpLoop(std::stop_token stopToken)
                                0LL,
                                static_cast<long long>(std::numeric_limits<std::uint32_t>::max())));
 
+                auto packet = m_udpClient->receivePacket(std::chrono::milliseconds(hasFrame ? 5 : 1));
+
                 m_udpClient->sendInterleaved(
                     UdpIqClient::SendMeta{
                         m_settings.udp.majorVersion,
@@ -974,27 +976,29 @@ void SdrWorker::udpLoop(std::stop_token stopToken)
                         bandwidth},
                     frame.int16Samples.data(),
                     static_cast<std::uint32_t>(std::min(frame.received, frame.int16Samples.size())));
+
+                packet = m_udpClient->receivePacket(std::chrono::milliseconds(hasFrame ? 5 : 1));
             }
 
-            while (!stopToken.stop_requested())
-            {
-                const auto packet = m_udpClient->receivePacket(std::chrono::milliseconds(hasFrame ? 5 : 1));
-                if (!packet.has_value())
-                {
-                    break;
-                }
+            // while (!stopToken.stop_requested())
+            // {
+            //     const auto packet = m_udpClient->receivePacket(std::chrono::milliseconds(hasFrame ? 5 : 1));
+            //     if (!packet.has_value())
+            //     {
+            //         break;
+            //     }
 
-                if (packet->result.bodyType == 202 && !packet->jamIq.iqSamples.empty())
-                {
-                    ProcessingFrame responseFrame;
-                    responseFrame.received = packet->jamIq.iqSamples.size();
-                    responseFrame.usesInt16 = true;
-                    responseFrame.int16Samples = packet->jamIq.iqSamples;
-                    enqueueProcessingFrame(std::move(responseFrame));
-                }
+            //     if (packet->result.bodyType == 202 && !packet->jamIq.iqSamples.empty())
+            //     {
+            //         ProcessingFrame responseFrame;
+            //         responseFrame.received = packet->jamIq.iqSamples.size();
+            //         responseFrame.usesInt16 = true;
+            //         responseFrame.int16Samples = packet->jamIq.iqSamples;
+            //         enqueueProcessingFrame(std::move(responseFrame));
+            //     }
 
-                std::cout << describeUdpPacket(*packet).toStdString() << std::endl;
-            }
+            //     std::cout << describeUdpPacket(*packet).toStdString() << std::endl;
+            // }
         }
     }
     catch (...)
@@ -1133,11 +1137,14 @@ void SdrWorker::processingLoop(std::stop_token stopToken)
                 }
                 else
                 {
+                    static double signal_center_freq = m_settings.centerFreq;
+
                     for (std::size_t spectrumChunk = 0; spectrumChunk < spectrumChunkCount; ++spectrumChunk)
                     {
                         const std::size_t chunkIndex = (spectrumChunk * fftChunkCount) / spectrumChunkCount;
                         const auto chunkOffset = static_cast<std::ptrdiff_t>(chunkIndex * fftSize);
-                        std::copy_n(frame.floatSamples.begin() + chunkOffset, fftSize, fftInput.begin());
+                        std::copy_n(frame.floatSamples.begin() + chunkOffset, fftSize, fftInput.begin());                                             
+
                         const std::vector<float> spectrum = processor->process(fftInput);
                         if (spectrum.empty())
                         {
@@ -1155,26 +1162,32 @@ void SdrWorker::processingLoop(std::stop_token stopToken)
                         if (signal_estimate.has_value())
                         {
                             static std::vector<double> recent_estimates;
-
-                            if (recent_estimates.size() > 100)
-                            {
-                                recent_estimates.clear();
-                            }
+                            
+                            // if (recent_estimates.size() > 100)
+                            // {
+                            //     recent_estimates.clear();
+                            // }
 
                             recent_estimates.push_back(signal_estimate->signal_center_Hz);
 
-                            if (recent_estimates.size() == 100)
+                            if (recent_estimates.size() % 100 == 0)
                             {
                                 auto m = recent_estimates.begin() + recent_estimates.size() / 2;
-                                std::nth_element(recent_estimates.begin(), m ,recent_estimates.end());
-                                const double average = recent_estimates[recent_estimates.size() / 2];
-                                emit signalCenterFrequencyUpdated(average);
+                                std::nth_element(recent_estimates.begin(), m, recent_estimates.end());
+                                signal_center_freq = recent_estimates[recent_estimates.size() / 2];
+                                emit signalCenterFrequencyUpdated(signal_center_freq);
 
-                                std::cout << "Signal center frequency: " << average << " Hz, "
+                                std::cout << "Signal center frequency: " << signal_center_freq << " Hz, "
                                           //   << signal_estimate->power_dbfs << " dBFS"
                                           << std::endl;
-                            }
+                            }                           
                         }
+
+                        
+                        frequency_shift_to_center(fftInput, m_settings.sampleRate, m_settings.centerFreq, signal_center_freq);
+
+                        // TODO, 计算移频后IQ数据的FFT，绘制到第二个窗口
+                        
                     }
                 }
             }

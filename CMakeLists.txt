@@ -38,6 +38,7 @@ qt_add_executable(qt6_b210_spectrum
     src/SignalProcessor.h
     src/UdpIqClient.cpp
     src/UdpIqClient.h
+    src/ftas_sdk.c
 )
 
 target_include_directories(qt6_b210_spectrum  PRIVATE src)

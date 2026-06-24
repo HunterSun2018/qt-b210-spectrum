@@ -267,7 +267,7 @@ void MainWindow::buildUi()
     m_rateSpin->setRange(1.0e5, 6.0e7);
     m_rateSpin->setDecimals(0);
     m_rateSpin->setSingleStep(1.0e5);
-    m_rateSpin->setValue(1.0e6);
+    m_rateSpin->setValue(3.2e5);
     m_rateSpin->setSuffix(" S/s");
     connect(m_rateSpin, &QDoubleSpinBox::valueChanged, this,
             [this](double value)
@@ -279,7 +279,7 @@ void MainWindow::buildUi()
     m_freqSpin->setRange(50.0, 6.0e9);
     m_freqSpin->setDecimals(0);
     m_freqSpin->setSingleStep(1.0e4);
-    m_freqSpin->setValue(103.9e6);
+    m_freqSpin->setValue(172.7e6);
     m_freqSpin->setSuffix(" Hz");
     m_freqSpin->installEventFilter(this);
     connect(m_freqSpin, &QDoubleSpinBox::valueChanged, this,

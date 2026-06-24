@@ -123,3 +123,32 @@ std::optional<SignalEstimate> estimate_signal(
 
     return result;
 }
+
+void frequency_shift_to_center(
+    std::vector<std::complex<float>>& iq,
+    double Fs,
+    double original_center_freq,
+    double signal_center_freq
+) {
+    double f_offset = signal_center_freq - original_center_freq;
+
+    double phase_inc = -2.0 * M_PI * f_offset / Fs;
+    double phase = 0.0;
+
+    for (auto& sample : iq) {
+        std::complex<float> mixer(
+            static_cast<float>(std::cos(phase)),
+            static_cast<float>(std::sin(phase))
+        );
+
+        sample *= mixer;
+
+        phase += phase_inc;
+
+        // 防止 phase 无限增大
+        if (phase > M_PI)
+            phase -= 2.0 * M_PI;
+        else if (phase < -M_PI)
+            phase += 2.0 * M_PI;
+    }
+}

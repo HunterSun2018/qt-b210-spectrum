@@ -21,3 +21,10 @@ std::optional<SignalEstimate> estimate_signal(
     int NFFT = 16384,
     double threshold_dB = 20.0
 ) ;
+
+
+void frequency_shift_to_center(
+    std::vector<std::complex<float>>& iq,
+    double Fs,
+    double original_center_freq,
+    double signal_center_freq);
